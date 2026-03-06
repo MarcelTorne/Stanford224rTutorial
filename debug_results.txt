@@ -1,0 +1,38 @@
+Using device: mps
+============================================================
+DEBUGGING: Why is DAgger failing?
+============================================================
+
+1. Collecting expert data on FAST pipes (speed=7.0)...
+   Collected 67638 transitions
+
+2. Collecting expert data on SLOW pipes (speed=2.0)...
+   Collected 115868 transitions
+
+3. Training BC on FAST expert data...
+    Epoch 20/100, Loss: 0.000004
+    Epoch 40/100, Loss: 0.000002
+    Epoch 60/100, Loss: 0.000001
+    Epoch 80/100, Loss: 0.000001
+    Epoch 100/100, Loss: 0.000001
+   BC (fast expert) on fast pipes: 342.7 ± 190.8
+
+4. Training BC on SLOW expert data...
+    Epoch 20/100, Loss: 0.000002
+    Epoch 40/100, Loss: 0.000001
+    Epoch 60/100, Loss: 0.000001
+    Epoch 80/100, Loss: 0.000000
+    Epoch 100/100, Loss: 0.000000
+   BC (slow expert) on fast pipes: 452.6 ± 256.5
+
+============================================================
+RESULTS
+============================================================
+UPPER BOUND (BC on fast expert):  342.7 ± 190.8
+BASELINE (BC on slow expert):     452.6 ± 256.5
+
+Gap to close: -109.8 steps
+
+If BC on fast expert gets ~1000, the problem is solvable.
+If BC on slow expert is similar, distribution shift isn't the issue.
+============================================================

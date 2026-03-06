@@ -1,0 +1,59 @@
+Using device: mps
+============================================================
+QUICK DEMO: DAgger Gravity Adaptation
+============================================================
+
+1. Collecting expert data (low gravity, gravity=0.5)...
+   Collected 167503 transitions
+
+2. Training BC policy on low gravity...
+    Epoch 10/60, Loss: 0.000002
+    Epoch 20/60, Loss: 0.000001
+    Epoch 30/60, Loss: 0.000001
+    Epoch 40/60, Loss: 0.000000
+    Epoch 50/60, Loss: 0.000000
+    Epoch 60/60, Loss: 0.000000
+
+3. Evaluating BC policy...
+   BC on low gravity: 860.8 ± 208.2 avg length
+   BC on HIGH gravity: 265.1 ± 138.2 avg length
+
+4. Running DAgger to adapt to HIGH gravity (gravity=1.5)...
+   Starting with 167503 low-gravity transitions
+   Need to add LOTS of high-gravity data to overcome this bias!
+  Round 1/15: Training on 167503 transitions...
+    Epoch 10/50, Loss: 0.000002
+    Epoch 20/50, Loss: 0.000001
+    Epoch 30/50, Loss: 0.000001
+    Epoch 40/50, Loss: 0.000001
+    Epoch 50/50, Loss: 0.000001
+    Evaluation: 271.3 ± 132.7 avg length (100 episodes)
+    Collecting 100 episodes with auto-relabeling... Got 26328 new transitions
+  Round 2/15: Training on 193831 transitions...
+    Epoch 10/50, Loss: 0.000002
+    Epoch 20/50, Loss: 0.000001
+    Epoch 30/50, Loss: 0.000001
+    Epoch 40/50, Loss: 0.000001
+    Epoch 50/50, Loss: 0.000000
+    Evaluation: 257.0 ± 139.5 avg length (100 episodes)
+    Collecting 100 episodes with auto-relabeling... Got 26283 new transitions
+  Round 3/15: Training on 220114 transitions...
+    Epoch 10/50, Loss: 0.000002
+    Epoch 20/50, Loss: 0.000001
+    Epoch 30/50, Loss: 0.000001
+    Epoch 40/50, Loss: 0.000001
+    Epoch 50/50, Loss: 0.000000
+    Evaluation: 263.4 ± 140.3 avg length (100 episodes)
+    Collecting 100 episodes with auto-relabeling... Got 26051 new transitions
+  Round 4/15: Training on 246165 transitions...
+    Epoch 10/50, Loss: 0.000002
+    Epoch 20/50, Loss: 0.000001
+    Epoch 30/50, Loss: 0.000001
+    Epoch 40/50, Loss: 0.000000
+    Epoch 50/50, Loss: 0.000000
+    Evaluation: 285.3 ± 136.0 avg length (100 episodes)
+    Collecting 100 episodes with auto-relabeling... Got 26001 new transitions
+  Round 5/15: Training on 272166 transitions...
+    Epoch 10/50, Loss: 0.000002
+    Epoch 20/50, Loss: 0.000001
+    Epoch 30/50, Loss: 0.000001
