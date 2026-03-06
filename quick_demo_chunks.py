@@ -17,6 +17,7 @@ Usage:
 
 import math
 import os
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -548,8 +549,29 @@ def evaluate_policy(policy, difficulty, num_episodes, pipe_speed=PIPE_SPEED,
     episode_lengths = []
     all_frames = []
     episode_outcomes = []
+    t_eval_start = time.time()
+    t_policy_total = 0.0
+    t_render_total = 0.0
+    n_policy_calls = 0
 
     for ep in range(num_episodes):
+        if recording and ep == video_episodes:
+            env.close()
+            pygame.quit()
+            if all_frames:
+                os.makedirs(os.path.dirname(video_path) or ".", exist_ok=True)
+                iio.imwrite(video_path, np.stack(all_frames), fps=30)
+                outcomes_str = ", ".join(
+                    [f"Ep{i+1}: {steps}steps ({outcome})"
+                     for i, (outcome, steps) in enumerate(episode_outcomes)])
+                print(f"  Saved video: {video_path}")
+                print(f"    {outcomes_str}")
+            recording = False
+            env = FlappyBirdEnv(difficulty=difficulty, pipe_speed=pipe_speed,
+                                render_mode=None)
+            if hasattr(policy, "set_env"):
+                policy.set_env(env)
+
         obs, _ = env.reset(seed=seed + ep)
         if hasattr(policy, "reset"):
             policy.reset()
@@ -565,29 +587,46 @@ def evaluate_policy(policy, difficulty, num_episodes, pipe_speed=PIPE_SPEED,
         while not done:
             if executor:
                 if executor.needs_query():
+                    t0 = time.time()
                     state_t = torch.tensor(obs, dtype=torch.float32,
                                            device=DEVICE).unsqueeze(0)
                     pred = policy(state_t).cpu().numpy().flatten()
+                    t_policy_total += time.time() - t0
+                    n_policy_calls += 1
                     executor.set_chunk(pred)
                     chunk_targets = executor.get_all_targets()
                 chunk_idx = executor.current_index()
                 action = executor.get_action()
             else:
+                t0 = time.time()
                 state_t = torch.tensor(obs, dtype=torch.float32,
                                        device=DEVICE).unsqueeze(0)
                 action = float(policy(state_t).cpu().numpy().flat[0])
+                t_policy_total += time.time() - t0
+                n_policy_calls += 1
                 chunk_targets = np.array([action])
                 chunk_idx = 0
 
             obs, _, terminated, truncated, _ = env.step(np.array([action]))
             if recording and ep < video_episodes:
+                t0 = time.time()
                 frame = env.render()
+                t_render_total += time.time() - t0
                 if frame is not None:
                     frame = _draw_chunk_overlay(frame, chunk_targets, chunk_idx)
                     frames.append(frame)
             done = terminated or truncated
 
         episode_lengths.append(env.step_count)
+
+        if (ep + 1) % max(1, num_episodes // 5) == 0 or ep == 0:
+            elapsed = time.time() - t_eval_start
+            avg_so_far = np.mean(episode_lengths)
+            per_call = (t_policy_total / n_policy_calls * 1000) if n_policy_calls else 0
+            print(f"    [eval] ep {ep+1}/{num_episodes} "
+                  f"({elapsed:.1f}s elapsed, avg_len={avg_so_far:.0f}, "
+                  f"policy: {t_policy_total:.1f}s/{n_policy_calls} calls "
+                  f"= {per_call:.1f}ms/call, render: {t_render_total:.1f}s)")
 
         if recording and ep < video_episodes and frames:
             last_frame = frames[-1].copy()
@@ -626,17 +665,21 @@ def evaluate_policy(policy, difficulty, num_episodes, pipe_speed=PIPE_SPEED,
                 ("TIMEOUT" if truncated else "CRASHED", len(frames) - 60))
 
     env.close()
+    elapsed = time.time() - t_eval_start
+    per_call = (t_policy_total / n_policy_calls * 1000) if n_policy_calls else 0
+    print(f"    [eval done] {num_episodes} eps in {elapsed:.1f}s | "
+          f"policy: {t_policy_total:.1f}s ({n_policy_calls} calls, "
+          f"{per_call:.1f}ms/call) | render: {t_render_total:.1f}s")
 
-    if recording:
+    if recording and all_frames:
         pygame.quit()
-        if all_frames:
-            os.makedirs(os.path.dirname(video_path) or ".", exist_ok=True)
-            iio.imwrite(video_path, np.stack(all_frames), fps=30)
-            outcomes_str = ", ".join(
-                [f"Ep{i+1}: {steps}steps ({outcome})"
-                 for i, (outcome, steps) in enumerate(episode_outcomes)])
-            print(f"  Saved video: {video_path}")
-            print(f"    {outcomes_str}")
+        os.makedirs(os.path.dirname(video_path) or ".", exist_ok=True)
+        iio.imwrite(video_path, np.stack(all_frames), fps=30)
+        outcomes_str = ", ".join(
+            [f"Ep{i+1}: {steps}steps ({outcome})"
+             for i, (outcome, steps) in enumerate(episode_outcomes)])
+        print(f"  Saved video: {video_path}")
+        print(f"    {outcomes_str}")
 
     return np.mean(episode_lengths), np.std(episode_lengths)
 
@@ -766,7 +809,7 @@ def main():
     expert_hard_mean, expert_hard_std = evaluate_policy(
         expert_hard, "hard", num_episodes=200, seed=500,
         use_chunks=False,
-        video_path="plots/expert_hard.mp4", video_episodes=5)
+        video_path="plots/expert_hard.mp4", video_episodes=3)
     print(f"    Expert hard: {expert_hard_mean:.1f} ± "
           f"{expert_hard_std:.1f} avg steps")
 
