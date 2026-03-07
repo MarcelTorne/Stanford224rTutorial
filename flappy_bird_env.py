@@ -31,18 +31,18 @@ BIRD_RADIUS = 15
 
 # Physics constants
 GRAVITY = 0.5          # pixels/step^2 downward (positive = down)
-THRUST_SCALE = 1.5     # pixels/step^2 per unit action (positive action = up)
-MAX_VEL = 6.0          # velocity clamp
+THRUST_SCALE = 2.5     # pixels/step^2 per unit action (positive action = up)
+MAX_VEL = 10.0         # velocity clamp
 
-# PD controller gains (moderate — bird tracks target with some lag)
-PD_KP = 2.0            # proportional gain on position error
-PD_KD = 0.8            # derivative gain on velocity
+# PD controller gains (responsive — bird tracks target quickly)
+PD_KP = 3.5            # proportional gain on position error
+PD_KD = 1.2            # derivative gain on velocity
 HOVER_THRUST = GRAVITY / THRUST_SCALE  # thrust to counteract gravity (~0.333)
 
 PIPE_WIDTH = 60
-PIPE_GAP_SIZE = 100  # vertical size of each opening
+PIPE_GAP_SIZE = 75   # vertical size of each opening
 PIPE_SPEED = 3.0
-PIPE_SPACING = 250   # horizontal distance between pipe centres
+PIPE_SPACING = 200   # horizontal distance between consecutive pipes
 
 MAX_STEPS = 1000
 
@@ -121,6 +121,8 @@ class FlappyBirdEnv(gym.Env):
         self.bird_vel = 0.0
         self.score = 0
         self.step_count = 0
+        self._pipe_count = 0
+        self._next_hard_gaps = None
 
         self.pipes = []
         self._spawn_pipe(SCREEN_W + 80)
@@ -193,7 +195,18 @@ class FlappyBirdEnv(gym.Env):
         if self.difficulty == "easy":
             g1, g2 = _random_easy_pipe(self._rng)
         else:
-            g1, g2 = _hard_pipe(self._rng)
+            if self._pipe_count % 2 == 0:
+                if self._next_hard_gaps is not None:
+                    g1, g2 = self._next_hard_gaps
+                    self._next_hard_gaps = None
+                else:
+                    g1, g2 = _hard_pipe(self._rng)
+            else:
+                upcoming_g1, upcoming_g2 = _hard_pipe(self._rng)
+                self._next_hard_gaps = (upcoming_g1, upcoming_g2)
+                mid = (upcoming_g1 + upcoming_g2) / 2.0
+                g1, g2 = mid, mid
+            self._pipe_count += 1
         self.pipes.append({"x": x, "gap1": g1, "gap2": g2, "scored": False})
 
     def _get_obs(self):

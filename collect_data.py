@@ -19,7 +19,7 @@ import os
 import numpy as np
 from flappy_bird_env import FlappyBirdEnv, SCREEN_H
 
-COMMIT_DIST = 0.30  # normalised pipe distance at which the expert picks a gap
+COMMIT_DIST = 0.18  # normalised pipe distance at which the expert picks a gap
 
 
 class Expert:
@@ -28,18 +28,23 @@ class Expert:
     Easy mode: target = gap centre.
     Hard mode: target = midpoint between gaps, then at commit_dist randomly
     pick one gap and target there.
+
+    Actions are temporally smoothed with an EMA to avoid discontinuous jumps.
     """
 
-    def __init__(self, commit_dist: float = COMMIT_DIST):
+    def __init__(self, commit_dist: float = COMMIT_DIST, smoothing: float = 0.15):
         self.commit_dist = commit_dist
+        self.smoothing = smoothing
         self.target_gap_idx = None
         self._last_gap_sig = None
         self._committed = False
+        self._smooth_target = None
 
     def reset(self):
         self.target_gap_idx = None
         self._last_gap_sig = None
         self._committed = False
+        self._smooth_target = None
 
     def act(self, obs: np.ndarray, difficulty: str) -> float:
         """Return target y position in [0, 1]."""
@@ -48,26 +53,33 @@ class Expert:
         gap2_y = obs[2]
 
         if difficulty == "easy":
-            return float(gap1_y)
+            raw_target = float(gap1_y)
+        else:
+            # --- Hard mode ---
+            gap_sig = (round(gap1_y, 3), round(gap2_y, 3))
+            if self._last_gap_sig != gap_sig:
+                self._committed = False
+                self.target_gap_idx = None
+                self._last_gap_sig = gap_sig
 
-        # --- Hard mode ---
-        gap_sig = (round(gap1_y, 3), round(gap2_y, 3))
-        if self._last_gap_sig != gap_sig:
-            self._committed = False
-            self.target_gap_idx = None
-            self._last_gap_sig = gap_sig
+            midpoint = (gap1_y + gap2_y) / 2.0
 
-        midpoint = (gap1_y + gap2_y) / 2.0
+            if not self._committed:
+                if dist < self.commit_dist:
+                    self.target_gap_idx = np.random.choice([0, 1])
+                    self._committed = True
+                else:
+                    raw_target = float(midpoint)
 
-        if not self._committed:
-            if dist < self.commit_dist:
-                self.target_gap_idx = np.random.choice([0, 1])
-                self._committed = True
-            else:
-                return float(midpoint)
+            if self._committed:
+                raw_target = float(gap1_y if self.target_gap_idx == 0 else gap2_y)
 
-        target_y = gap1_y if self.target_gap_idx == 0 else gap2_y
-        return float(target_y)
+        if self._smooth_target is None:
+            self._smooth_target = raw_target
+        else:
+            self._smooth_target += self.smoothing * (raw_target - self._smooth_target)
+
+        return float(np.clip(self._smooth_target, 0.0, 1.0))
 
 
 def compute_action(bird_y: float, target_y: float) -> float:

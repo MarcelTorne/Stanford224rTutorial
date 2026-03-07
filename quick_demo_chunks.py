@@ -244,6 +244,63 @@ class TemporalNoisePredictor(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Gaussian BC Policy (learned mean + variance)
+# ---------------------------------------------------------------------------
+
+class GaussianBCPolicy(nn.Module):
+    """MLP that outputs mean and log-variance for a Gaussian over actions."""
+
+    def __init__(self, state_dim=4, action_dim=1, hidden=256):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(state_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+        )
+        self.mean_head = nn.Sequential(
+            nn.Linear(hidden, action_dim),
+            nn.Sigmoid(),
+        )
+        self.log_var_head = nn.Linear(hidden, action_dim)
+
+    def forward(self, state):
+        h = self.backbone(state)
+        mean = self.mean_head(h)
+        log_var = self.log_var_head(h)
+        return mean, log_var
+
+    def sample(self, state):
+        mean, log_var = self.forward(state)
+        std = (0.5 * log_var).exp()
+        return (mean + std * torch.randn_like(std)).clamp(0, 1)
+
+    def deterministic(self, state):
+        mean, _ = self.forward(state)
+        return mean
+
+
+class GaussianWrapper:
+    """Wrap GaussianBCPolicy for evaluate_policy (det or stochastic)."""
+
+    def __init__(self, model, stochastic=False):
+        self.model = model
+        self.stochastic = stochastic
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def __call__(self, state):
+        if self.stochastic:
+            return self.model.sample(state)
+        return self.model.deterministic(state)
+
+    def state_dict(self):
+        return self.model.state_dict()
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 NUM_DIFFUSION_ITERS = 20
@@ -317,6 +374,38 @@ def train_bc_policy(states, actions, epochs=50, batch_size=256, lr=1e-3,
             a_batch = a_batch.to(DEVICE)
             pred = policy(s_batch)
             loss = loss_fn(pred, a_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * s_batch.size(0)
+            n += s_batch.size(0)
+
+        if verbose and (epoch + 1) % 10 == 0:
+            print(f"    Epoch {epoch+1}/{epochs}, Loss: {total_loss/n:.6f}")
+
+    return policy
+
+
+def train_gaussian_bc_policy(states, actions, epochs=50, batch_size=256,
+                              lr=1e-3, verbose=False):
+    """Train Gaussian BC policy (mean + learned variance) with NLL loss."""
+    s_tensor = torch.tensor(states, dtype=torch.float32)
+    a_tensor = torch.tensor(actions, dtype=torch.float32)
+    action_dim = a_tensor.shape[1]
+    loader = DataLoader(TensorDataset(s_tensor, a_tensor),
+                        batch_size=batch_size, shuffle=True)
+
+    policy = GaussianBCPolicy(action_dim=action_dim).to(DEVICE)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        total_loss = 0.0
+        n = 0
+        for s_batch, a_batch in loader:
+            s_batch = s_batch.to(DEVICE)
+            a_batch = a_batch.to(DEVICE)
+            mean, log_var = policy(s_batch)
+            loss = 0.5 * (log_var + (a_batch - mean).pow(2) / log_var.exp()).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -799,7 +888,7 @@ def main():
 
     # 1a. Collect expert data on hard mode
     print("\n1a. Collecting hard-mode expert data...")
-    hard_states, hard_actions = collect_expert_data("hard", num_episodes=100,
+    hard_states, hard_actions = collect_expert_data("hard", num_episodes=500,
                                                     seed=0)
     print(f"    Collected {len(hard_states)} chunk transitions")
 
@@ -807,7 +896,7 @@ def main():
     print("\n    Evaluating expert (with video)...")
     expert_hard = ExpertWrapper("hard")
     expert_hard_mean, expert_hard_std = evaluate_policy(
-        expert_hard, "hard", num_episodes=200, seed=500,
+        expert_hard, "hard", num_episodes=10, seed=500,
         use_chunks=False,
         video_path="plots/expert_hard.mp4", video_episodes=3)
     print(f"    Expert hard: {expert_hard_mean:.1f} ± "
@@ -816,10 +905,10 @@ def main():
     # 1c. Train Diffusion on hard data
     print("\n1c. Training Diffusion policy on hard data...")
     diff_hard = train_diffusion_policy(hard_states, hard_actions, epochs=50,
-                                       T=NUM_DIFFUSION_ITERS, verbose=True)
+                                       T=NUM_DIFFUSION_ITERS, batch_size=2048, verbose=True)
 
     diff_hard_mean, diff_hard_std = evaluate_policy(
-        diff_hard, "hard", num_episodes=100, seed=500,
+        diff_hard, "hard", num_episodes=50, seed=500,
         video_path="plots/diffusion_hard.mp4", video_episodes=3)
     print(f"    Diffusion:        {diff_hard_mean:.1f} ± "
           f"{diff_hard_std:.1f} avg steps")
@@ -831,14 +920,36 @@ def main():
 
     print("    Evaluating BC on hard mode (100 episodes)...")
     bc_hard_mean, bc_hard_std = evaluate_policy(
-        bc_hard, "hard", num_episodes=100, seed=500,
+        bc_hard, "hard", num_episodes=50, seed=500,
         video_path="plots/bc_hard.mp4", video_episodes=3)
     print(f"    BC  (regression): {bc_hard_mean:.1f} ± "
           f"{bc_hard_std:.1f} avg steps")
 
+    # 1d. Train Gaussian BC (learned variance) on hard data
+    print("\n1d. Training Gaussian BC (NLL, learned variance) on hard data...")
+    gauss_hard = train_gaussian_bc_policy(hard_states, hard_actions, epochs=80,
+                                          verbose=True)
+
+    print("    Evaluating Gaussian BC (deterministic = mean only)...")
+    gauss_det = GaussianWrapper(gauss_hard, stochastic=False)
+    gauss_det_mean, gauss_det_std = evaluate_policy(
+        gauss_det, "hard", num_episodes=50, seed=500,
+        video_path="plots/gauss_det_hard.mp4", video_episodes=3)
+    print(f"    Gauss (det):      {gauss_det_mean:.1f} ± "
+          f"{gauss_det_std:.1f} avg steps")
+
+    print("    Evaluating Gaussian BC (stochastic = sample from N(mu, sigma))...")
+    gauss_stoch = GaussianWrapper(gauss_hard, stochastic=True)
+    gauss_stoch_mean, gauss_stoch_std = evaluate_policy(
+        gauss_stoch, "hard", num_episodes=50, seed=500,
+        video_path="plots/gauss_stoch_hard.mp4", video_episodes=3)
+    print(f"    Gauss (stoch):    {gauss_stoch_mean:.1f} ± "
+          f"{gauss_stoch_std:.1f} avg steps")
+
     # 1e. Save models
     torch.save(bc_hard.state_dict(), "models/bc_hard_chunk.pt")
     torch.save(diff_hard.state_dict(), "models/diffusion_hard_chunk.pt")
+    torch.save(gauss_hard.state_dict(), "models/gauss_hard_chunk.pt")
 
     # ================================================================
     # PART 2: Hard mode — DAgger resolves bimodal ambiguity
@@ -855,12 +966,12 @@ def main():
         difficulty="hard",
         initial_states=hard_states,
         initial_actions=hard_actions,
-        rounds=10,
+        rounds=2,
         episodes_per_round=30,
         epochs=80,
         pipe_speed=PIPE_SPEED,
         seed=5000,
-        eval_episodes=100,
+        eval_episodes=50,
         verbose=True,
     )
     dagger_hard_mean = dagger_means[-1]
@@ -894,18 +1005,21 @@ def main():
     plt.savefig('plots/dagger_hard_curve.png', dpi=150)
     print("  Saved: plots/dagger_hard_curve.png")
 
-    # 2c. Three-way comparison bar chart
-    print("\n2c. Creating three-way comparison chart...")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    methods = ['BC\n(regression)', 'Diffusion\n(DDPM)', 'DAgger\n(upper gap)']
-    values = [bc_hard_mean, diff_hard_mean, dagger_hard_mean]
-    errors = [bc_hard_std, diff_hard_std, dagger_hard_std]
-    colors = ['C0', 'C1', 'C2']
+    # 2c. Five-way comparison bar chart
+    print("\n2c. Creating five-way comparison chart...")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    methods = ['BC MSE\n(det)', 'Gauss NLL\n(det)', 'Gauss NLL\n(stoch)',
+               'Diffusion\n(DDPM)', 'DAgger\n(upper gap)']
+    values = [bc_hard_mean, gauss_det_mean, gauss_stoch_mean,
+              diff_hard_mean, dagger_hard_mean]
+    errors = [bc_hard_std, gauss_det_std, gauss_stoch_std,
+              diff_hard_std, dagger_hard_std]
+    colors = ['C0', 'C3', 'C4', 'C1', 'C2']
     bars = ax.bar(methods, values, yerr=errors, capsize=10,
                   color=colors, alpha=0.8, edgecolor='black', linewidth=2,
                   error_kw={'linewidth': 2, 'ecolor': 'black'})
     ax.set_ylabel('Avg Episode Length (hard mode)', fontsize=12)
-    ax.set_title('Three Approaches to Bimodal Expert Data',
+    ax.set_title('Five Approaches to Bimodal Expert Data',
                  fontsize=14, fontweight='bold')
     ax.set_ylim(0, 1200)
     ax.axhline(1000, color='gray', linestyle=':', linewidth=1, alpha=0.5,
@@ -918,8 +1032,8 @@ def main():
     ax.legend(fontsize=11, loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig('plots/three_way_comparison.png', dpi=150)
-    print("  Saved: plots/three_way_comparison.png")
+    plt.savefig('plots/five_way_comparison.png', dpi=150)
+    print("  Saved: plots/five_way_comparison.png")
 
     # 2d. Evaluate DAgger (with video) and save model
     torch.save(dagger_policy.state_dict(), "models/dagger_hard_chunk.pt")
@@ -945,7 +1059,7 @@ def main():
     print("    Training BC on easy data...")
     bc_easy = train_bc_policy(easy_states, easy_actions, epochs=60)
     bc_easy_mean, bc_easy_std = evaluate_policy(bc_easy, "easy",
-                                                num_episodes=100, seed=600)
+                                                num_episodes=50, seed=600)
     print(f"    BC  on easy: {bc_easy_mean:.1f} ± "
           f"{bc_easy_std:.1f} avg steps")
 
@@ -953,7 +1067,7 @@ def main():
     diff_easy = train_diffusion_policy(easy_states, easy_actions,
                                        epochs=100, T=NUM_DIFFUSION_ITERS)
     diff_easy_mean, diff_easy_std = evaluate_policy(diff_easy, "easy",
-                                                    num_episodes=100,
+                                                    num_episodes=50,
                                                     seed=600)
     print(f"    Diff on easy: {diff_easy_mean:.1f} ± "
           f"{diff_easy_std:.1f} avg steps")
@@ -1002,11 +1116,15 @@ def main():
     print(f"\nAction chunks: predict {ACTION_CHUNK}, execute first "
           f"{EXECUTE_STEPS}")
 
-    print("\nPART 1 — BC vs Diffusion on hard mode:")
-    print(f"  BC  on hard: {bc_hard_mean:.1f} +/- {bc_hard_std:.1f}  "
-          f"<- crashes (mode averaging)")
-    print(f"  Diff on hard: {diff_hard_mean:.1f} +/- {diff_hard_std:.1f}  "
-          f"<- models both modes")
+    print("\nPART 1 — Regression variants on hard mode:")
+    print(f"  BC MSE (det):       {bc_hard_mean:.1f} +/- {bc_hard_std:.1f}  "
+          f"<- mean averages modes, crashes")
+    print(f"  Gauss NLL (det):    {gauss_det_mean:.1f} +/- {gauss_det_std:.1f}  "
+          f"<- mean still averages, crashes")
+    print(f"  Gauss NLL (stoch):  {gauss_stoch_mean:.1f} +/- {gauss_stoch_std:.1f}  "
+          f"<- samples randomly, no coherence")
+    print(f"  Diffusion:          {diff_hard_mean:.1f} +/- {diff_hard_std:.1f}  "
+          f"<- models full distribution")
 
     print(f"\nPART 2 — DAgger on hard mode:")
     print(f"  DAgger final: {dagger_hard_mean:.1f} +/- "
@@ -1019,11 +1137,12 @@ def main():
     print("\nPlots saved:")
     print("  - plots/bc_vs_diffusion.png")
     print("  - plots/dagger_hard_curve.png")
-    print("  - plots/three_way_comparison.png")
+    print("  - plots/five_way_comparison.png")
     print("\nVideos saved:")
     print("  - plots/expert_hard.mp4")
     print("  - plots/bc_hard.mp4, plots/diffusion_hard.mp4, "
           "plots/dagger_hard.mp4")
+    print("  - plots/gauss_det_hard.mp4, plots/gauss_stoch_hard.mp4")
     print("=" * 60)
 
 
