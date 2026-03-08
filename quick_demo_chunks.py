@@ -29,11 +29,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from typing import Union
-from collect_data import Expert, compute_action, compute_action_gravity
+from collect_data import Expert, compute_action, compute_action_gravity, COMMIT_DIST
 from flappy_bird_env import FlappyBirdEnv, SCREEN_W, SCREEN_H, BIRD_X
 from train_bc import BCPolicy
 from train_diffusion import DDPMSchedule
-
+BC_BATCH_SIZE = 256
+BC_EPOCHS = 100
 # ---------------------------------------------------------------------------
 # 1-D Temporal U-Net  (adapted from Chi et al., Diffusion Policy)
 # ---------------------------------------------------------------------------
@@ -299,6 +300,61 @@ class GaussianWrapper:
 
     def state_dict(self):
         return self.model.state_dict()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic expert for DAgger relabeling
+# ---------------------------------------------------------------------------
+
+class DeterministicExpert:
+    """Expert that always picks gap1 (upper gap) in hard mode.
+
+    Mimics the real Expert's behavior (hover at midpoint, commit when close,
+    EMA smoothing) but replaces the random gap choice with a deterministic
+    one.  This produces smooth, consistent relabeling that is compatible
+    with the original expert data.
+    """
+
+    def __init__(self, commit_dist: float = COMMIT_DIST, smoothing: float = 0.15):
+        self.commit_dist = commit_dist
+        self.smoothing = smoothing
+        self._last_gap_sig = None
+        self._committed = False
+        self._smooth_target = None
+
+    def reset(self):
+        self._last_gap_sig = None
+        self._committed = False
+        self._smooth_target = None
+
+    def act(self, obs: np.ndarray) -> float:
+        dist = obs[0]
+        gap1_y = obs[1]
+        gap2_y = obs[2]
+
+        gap_sig = (round(gap1_y, 3), round(gap2_y, 3))
+        if self._last_gap_sig != gap_sig:
+            self._committed = False
+            self._last_gap_sig = gap_sig
+
+        midpoint = (gap1_y + gap2_y) / 2.0
+
+        if not self._committed:
+            if dist < self.commit_dist:
+                self._committed = True
+                raw_target = float(gap1_y)
+            else:
+                raw_target = float(midpoint)
+        else:
+            raw_target = float(gap1_y)
+
+        if self._smooth_target is None:
+            self._smooth_target = raw_target
+        else:
+            self._smooth_target += self.smoothing * (
+                raw_target - self._smooth_target)
+
+        return float(np.clip(self._smooth_target, 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -782,14 +838,16 @@ def evaluate_policy(policy, difficulty, num_episodes, pipe_speed=PIPE_SPEED,
 def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
     """Roll out policy with chunk execution, relabel with deterministic expert.
 
-    The expert always targets gap1 (upper gap) in hard mode.
-    Labels are action chunks: (s_t, [expert_a_t, ..., expert_a_{t+K-1}]).
+    Uses DeterministicExpert which hovers at the midpoint when far from the
+    pipe, commits to gap1 (upper gap) when close, and applies EMA smoothing
+    — matching the original expert's trajectory style.
     """
     policy.eval()
     env = FlappyBirdEnv(difficulty=difficulty, pipe_speed=pipe_speed)
     if hasattr(policy, "set_env"):
         policy.set_env(env)
     executor = ChunkExecutor()
+    det_expert = DeterministicExpert()
     new_states, new_actions = [], []
 
     for ep in range(num_episodes):
@@ -797,6 +855,7 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
         if hasattr(policy, "reset"):
             policy.reset()
         executor.reset()
+        det_expert.reset()
         done = False
         ep_states, ep_expert_actions = [], []
 
@@ -807,9 +866,7 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
                 pred = policy(state_t).cpu().numpy().flatten()
                 executor.set_chunk(pred)
 
-            bird_y = obs[3]
-            target_y = obs[1]
-            optimal_action = compute_action(bird_y, target_y)
+            optimal_action = det_expert.act(obs)
 
             ep_states.append(obs.copy())
             ep_expert_actions.append(optimal_action)
@@ -844,7 +901,7 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
               f"transitions...")
 
         policy = train_bc_policy(all_states, all_actions, epochs=epochs,
-                                 verbose=verbose)
+                                 verbose=verbose, batch_size=BC_BATCH_SIZE)
 
         avg_len, std_len = evaluate_policy(
             policy, difficulty, num_episodes=eval_episodes,
@@ -862,8 +919,8 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         print(f"Got {len(new_states)} new transitions")
 
         if len(new_states) > 0:
-            all_states = np.concatenate([all_states, new_states], axis=0)
-            all_actions = np.concatenate([all_actions, new_actions], axis=0)
+            all_states = np.concatenate([new_states], axis=0)
+            all_actions = np.concatenate([new_actions], axis=0)
 
     return policy, performance_means, performance_stds
 
@@ -890,7 +947,7 @@ def main():
     # 1a. Collect expert data on hard mode
     print("\n1a. Collecting hard-mode expert data...")
     hard_states, hard_actions = collect_expert_data("hard", num_episodes=500,
-                                                    seed=0)
+                                                    seed=1)
     print(f"    Collected {len(hard_states)} chunk transitions")
 
     # Expert baseline (step-by-step, no chunks)
@@ -903,6 +960,39 @@ def main():
     print(f"    Expert hard: {expert_hard_mean:.1f} ± "
           f"{expert_hard_std:.1f} avg steps")
 
+              # 1b. Train BC (regression) on hard data
+    print("\n1b. Training BC (MSE regression) on hard data...")
+    bc_hard = train_bc_policy(hard_states, hard_actions, epochs=BC_EPOCHS,
+                              verbose=True, batch_size=BC_BATCH_SIZE)
+
+    print("    Evaluating BC on hard mode (100 episodes)...")
+    bc_hard_mean, bc_hard_std = evaluate_policy(
+        bc_hard, "hard", num_episodes=50, seed=500,
+        video_path="plots/bc_hard.mp4", video_episodes=3)
+    print(f"    BC  (regression): {bc_hard_mean:.1f} ± "
+          f"{bc_hard_std:.1f} avg steps")
+
+
+    # 2a. Run DAgger starting from the SAME bimodal expert data
+    print("2a. Running DAgger on hard mode (expert always -> upper gap)...")
+    dagger_policy, dagger_means, dagger_stds = run_dagger(
+        difficulty="hard",
+        initial_states=hard_states,
+        initial_actions=hard_actions,
+        rounds=5,
+        episodes_per_round=30,
+        epochs=BC_EPOCHS,
+        pipe_speed=PIPE_SPEED,
+        seed=5000,
+        eval_episodes=50,
+        verbose=True,
+    )
+    dagger_hard_mean = dagger_means[-1]
+    dagger_hard_std = dagger_stds[-1]
+    print(f"\n    DAgger final: {dagger_hard_mean:.1f} ± "
+          f"{dagger_hard_std:.1f}")
+
+
     # 1c. Train Diffusion on hard data
     print("\n1c. Training Diffusion policy on hard data...")
     diff_hard = train_diffusion_policy(hard_states, hard_actions, epochs=50,
@@ -914,21 +1004,9 @@ def main():
     print(f"    Diffusion:        {diff_hard_mean:.1f} ± "
           f"{diff_hard_std:.1f} avg steps")
 
-    # 1b. Train BC (regression) on hard data
-    print("\n1b. Training BC (MSE regression) on hard data...")
-    bc_hard = train_bc_policy(hard_states, hard_actions, epochs=80,
-                              verbose=True)
-
-    print("    Evaluating BC on hard mode (100 episodes)...")
-    bc_hard_mean, bc_hard_std = evaluate_policy(
-        bc_hard, "hard", num_episodes=50, seed=500,
-        video_path="plots/bc_hard.mp4", video_episodes=3)
-    print(f"    BC  (regression): {bc_hard_mean:.1f} ± "
-          f"{bc_hard_std:.1f} avg steps")
-
     # 1d. Train Gaussian BC (learned variance) on hard data
     print("\n1d. Training Gaussian BC (NLL, learned variance) on hard data...")
-    gauss_hard = train_gaussian_bc_policy(hard_states, hard_actions, epochs=80,
+    gauss_hard = train_gaussian_bc_policy(hard_states, hard_actions, epochs=20,
                                           verbose=True)
 
     print("    Evaluating Gaussian BC (deterministic = mean only)...")
@@ -961,24 +1039,6 @@ def main():
     print("DAgger relabels with an expert that always picks the upper gap.")
     print("Over rounds, the unimodal relabeled data resolves the ambiguity.\n")
 
-    # 2a. Run DAgger starting from the SAME bimodal expert data
-    print("2a. Running DAgger on hard mode (expert always -> upper gap)...")
-    dagger_policy, dagger_means, dagger_stds = run_dagger(
-        difficulty="hard",
-        initial_states=hard_states,
-        initial_actions=hard_actions,
-        rounds=2,
-        episodes_per_round=30,
-        epochs=80,
-        pipe_speed=PIPE_SPEED,
-        seed=5000,
-        eval_episodes=50,
-        verbose=True,
-    )
-    dagger_hard_mean = dagger_means[-1]
-    dagger_hard_std = dagger_stds[-1]
-    print(f"\n    DAgger final: {dagger_hard_mean:.1f} ± "
-          f"{dagger_hard_std:.1f}")
 
     # 2b. DAgger learning curve
     print("\n2b. Creating DAgger learning curve...")

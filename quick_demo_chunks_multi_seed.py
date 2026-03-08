@@ -12,8 +12,10 @@ During rollout, only the first ACTION_CHUNK//2 are executed before re-predicting
 (receding horizon).  Videos visualise all predicted targets as dots.
 
 Usage:
-    python quick_demo_chunks_multi_seed.py
     srun --reservation=daily --gres=gpu:1 --pty bash
+    conda activate flow-dpo
+    python quick_demo_chunks_multi_seed.py
+
 """
 
 import math
@@ -29,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from typing import Union
-from collect_data import Expert, compute_action, compute_action_gravity
+from collect_data import Expert, compute_action, compute_action_gravity, COMMIT_DIST
 from flappy_bird_env import FlappyBirdEnv, SCREEN_W, SCREEN_H, BIRD_X
 from train_bc import BCPolicy
 from train_diffusion import DDPMSchedule
@@ -302,6 +304,61 @@ class GaussianWrapper:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic expert for DAgger relabeling
+# ---------------------------------------------------------------------------
+
+class DeterministicExpert:
+    """Expert that always picks gap1 (upper gap) in hard mode.
+
+    Mimics the real Expert's behavior (hover at midpoint, commit when close,
+    EMA smoothing) but replaces the random gap choice with a deterministic
+    one.  This produces smooth, consistent relabeling that is compatible
+    with the original expert data.
+    """
+
+    def __init__(self, commit_dist: float = COMMIT_DIST, smoothing: float = 0.15):
+        self.commit_dist = commit_dist
+        self.smoothing = smoothing
+        self._last_gap_sig = None
+        self._committed = False
+        self._smooth_target = None
+
+    def reset(self):
+        self._last_gap_sig = None
+        self._committed = False
+        self._smooth_target = None
+
+    def act(self, obs: np.ndarray) -> float:
+        dist = obs[0]
+        gap1_y = obs[1]
+        gap2_y = obs[2]
+
+        gap_sig = (round(gap1_y, 3), round(gap2_y, 3))
+        if self._last_gap_sig != gap_sig:
+            self._committed = False
+            self._last_gap_sig = gap_sig
+
+        midpoint = (gap1_y + gap2_y) / 2.0
+
+        if not self._committed:
+            if dist < self.commit_dist:
+                self._committed = True
+                raw_target = float(gap1_y)
+            else:
+                raw_target = float(midpoint)
+        else:
+            raw_target = float(gap1_y)
+
+        if self._smooth_target is None:
+            self._smooth_target = raw_target
+        else:
+            self._smooth_target += self.smoothing * (
+                raw_target - self._smooth_target)
+
+        return float(np.clip(self._smooth_target, 0.0, 1.0))
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 NUM_DIFFUSION_ITERS = 20
@@ -354,7 +411,7 @@ def collect_expert_data(difficulty, num_episodes, pipe_speed=PIPE_SPEED, seed=0)
 # Training helpers
 # ---------------------------------------------------------------------------
 
-def train_bc_policy(states, actions, epochs=50, batch_size=256, lr=1e-3,
+def train_bc_policy(states, actions, epochs=50, batch_size=2048, lr=1e-3,
                     verbose=False):
     """Train BC policy that outputs ACTION_CHUNK actions."""
     s_tensor = torch.tensor(states, dtype=torch.float32)
@@ -387,7 +444,7 @@ def train_bc_policy(states, actions, epochs=50, batch_size=256, lr=1e-3,
     return policy
 
 
-def train_gaussian_bc_policy(states, actions, epochs=50, batch_size=256,
+def train_gaussian_bc_policy(states, actions, epochs=50, batch_size=2048,
                               lr=1e-3, verbose=False):
     """Train Gaussian BC policy (mean + learned variance) with NLL loss."""
     s_tensor = torch.tensor(states, dtype=torch.float32)
@@ -419,7 +476,7 @@ def train_gaussian_bc_policy(states, actions, epochs=50, batch_size=256,
     return policy
 
 
-def train_diffusion_policy(states, actions, epochs=100, batch_size=256,
+def train_diffusion_policy(states, actions, epochs=100, batch_size=2048,
                            lr=1e-4, T=100, beta_start=0.0001, beta_end=0.02,
                            verbose=False):
     """Train a DDPM diffusion policy outputting ACTION_CHUNK actions."""
@@ -782,14 +839,16 @@ def evaluate_policy(policy, difficulty, num_episodes, pipe_speed=PIPE_SPEED,
 def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
     """Roll out policy with chunk execution, relabel with deterministic expert.
 
-    The expert always targets gap1 (upper gap) in hard mode.
-    Labels are action chunks: (s_t, [expert_a_t, ..., expert_a_{t+K-1}]).
+    Uses DeterministicExpert which hovers at the midpoint when far from the
+    pipe, commits to gap1 (upper gap) when close, and applies EMA smoothing
+    — matching the original expert's trajectory style.
     """
     policy.eval()
     env = FlappyBirdEnv(difficulty=difficulty, pipe_speed=pipe_speed)
     if hasattr(policy, "set_env"):
         policy.set_env(env)
     executor = ChunkExecutor()
+    det_expert = DeterministicExpert()
     new_states, new_actions = [], []
 
     for ep in range(num_episodes):
@@ -797,6 +856,7 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
         if hasattr(policy, "reset"):
             policy.reset()
         executor.reset()
+        det_expert.reset()
         done = False
         ep_states, ep_expert_actions = [], []
 
@@ -807,9 +867,7 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
                 pred = policy(state_t).cpu().numpy().flatten()
                 executor.set_chunk(pred)
 
-            bird_y = obs[3]
-            target_y = obs[1]
-            optimal_action = compute_action(bird_y, target_y)
+            optimal_action = det_expert.act(obs)
 
             ep_states.append(obs.copy())
             ep_expert_actions.append(optimal_action)
@@ -832,8 +890,12 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
 
 def run_dagger(difficulty, initial_states, initial_actions, rounds,
                episodes_per_round, epochs, pipe_speed, seed,
-               eval_episodes=100, verbose=False):
-    """Run DAgger training loop with automatic relabeling."""
+               eval_episodes=100, verbose=False, video_dir=None):
+    """Run DAgger training loop with automatic relabeling.
+
+    If *video_dir* is given, saves a video for each round at
+    ``video_dir/dagger_round_{rnd}.mp4``.
+    """
     all_states = initial_states.copy()
     all_actions = initial_actions.copy()
     performance_means = []
@@ -846,9 +908,14 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         policy = train_bc_policy(all_states, all_actions, epochs=epochs,
                                  verbose=verbose)
 
+        video_path = None
+        if video_dir is not None:
+            video_path = f"{video_dir}/dagger_round_{rnd}.mp4"
+
         avg_len, std_len = evaluate_policy(
             policy, difficulty, num_episodes=eval_episodes,
-            pipe_speed=pipe_speed, seed=seed + rnd * 1000)
+            pipe_speed=pipe_speed, seed=seed + rnd * 1000,
+            video_path=video_path, video_episodes=3)
         performance_means.append(avg_len)
         performance_stds.append(std_len)
         print(f"    Evaluation: {avg_len:.1f} ± {std_len:.1f} avg length "
@@ -862,8 +929,8 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         print(f"Got {len(new_states)} new transitions")
 
         if len(new_states) > 0:
-            all_states = np.concatenate([all_states, new_states], axis=0)
-            all_actions = np.concatenate([all_actions, new_actions], axis=0)
+            all_states = np.concatenate([new_states], axis=0)
+            all_actions = np.concatenate([new_actions], axis=0)
 
     return policy, performance_means, performance_stds
 
@@ -875,9 +942,7 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
 def main():
     os.makedirs("data", exist_ok=True)
     os.makedirs("models", exist_ok=True)
-    os.makedirs("plots", exist_ok=True)
-
-    SEEDS = [0, 42, 123]
+    SEEDS = [1,2000, 3000]
     NUM_SEEDS = len(SEEDS)
     EVAL_SEED_HARD = 500
     EVAL_SEED_EASY = 600
@@ -899,7 +964,7 @@ def main():
     expert_hard_mean, expert_hard_std = evaluate_policy(
         expert_hard, "hard", num_episodes=10, seed=EVAL_SEED_HARD,
         use_chunks=False,
-        video_path="plots/expert_hard.mp4", video_episodes=3)
+        video_path="plots/hard_mode/expert_hard.mp4", video_episodes=3)
     print(f"  Expert hard: {expert_hard_mean:.1f} ± "
           f"{expert_hard_std:.1f} avg steps")
 
@@ -915,55 +980,15 @@ def main():
         print(f"  SEED {si+1}/{NUM_SEEDS} (seed={seed})")
         print(f"{'─' * 60}")
 
+        seed_dir = f"plots/hard_mode/seed_{seed}"
+        os.makedirs(seed_dir, exist_ok=True)
+
         # --- Collect hard-mode expert data ---
         print(f"\n  Collecting hard-mode expert data (seed={seed})...")
         hard_states, hard_actions = collect_expert_data(
             "hard", num_episodes=500, seed=seed)
         print(f"    Collected {len(hard_states)} chunk transitions")
 
-        # --- Diffusion ---
-        print("\n  Training Diffusion policy...")
-        diff_hard = train_diffusion_policy(
-            hard_states, hard_actions, epochs=50,
-            T=NUM_DIFFUSION_ITERS, batch_size=2048, verbose=True)
-        video = "plots/diffusion_hard.mp4" if si == 0 else None
-        m, s = evaluate_policy(
-            diff_hard, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
-            video_path=video, video_episodes=3)
-        diff_hard_means.append(m)
-        print(f"    Diffusion: {m:.1f} ± {s:.1f}")
-
-        # --- BC (MSE regression) ---
-        print("\n  Training BC (MSE regression)...")
-        bc_hard = train_bc_policy(
-            hard_states, hard_actions, epochs=80, verbose=True)
-        video = "plots/bc_hard.mp4" if si == 0 else None
-        m, s = evaluate_policy(
-            bc_hard, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
-            video_path=video, video_episodes=3)
-        bc_hard_means.append(m)
-        print(f"    BC: {m:.1f} ± {s:.1f}")
-
-        # --- Gaussian BC (NLL, learned variance) ---
-        print("\n  Training Gaussian BC (NLL)...")
-        gauss_hard = train_gaussian_bc_policy(
-            hard_states, hard_actions, epochs=80, verbose=True)
-
-        gauss_det = GaussianWrapper(gauss_hard, stochastic=False)
-        video = "plots/gauss_det_hard.mp4" if si == 0 else None
-        m, s = evaluate_policy(
-            gauss_det, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
-            video_path=video, video_episodes=3)
-        gauss_det_means.append(m)
-        print(f"    Gauss (det): {m:.1f} ± {s:.1f}")
-
-        gauss_stoch = GaussianWrapper(gauss_hard, stochastic=True)
-        video = "plots/gauss_stoch_hard.mp4" if si == 0 else None
-        m, s = evaluate_policy(
-            gauss_stoch, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
-            video_path=video, video_episodes=3)
-        gauss_stoch_means.append(m)
-        print(f"    Gauss (stoch): {m:.1f} ± {s:.1f}")
 
         # --- DAgger ---
         print("\n  Running DAgger...")
@@ -978,18 +1003,59 @@ def main():
             seed=seed + 5000,
             eval_episodes=50,
             verbose=True,
+            video_dir=seed_dir,
         )
         dagger_final_means.append(dagger_round_means[-1])
         dagger_all_round_means.append(dagger_round_means)
         print(f"    DAgger final: {dagger_round_means[-1]:.1f}")
 
-        if si == 0:
-            dagger_eval_m, dagger_eval_s = evaluate_policy(
-                dagger_policy, "hard", num_episodes=100,
-                seed=EVAL_SEED_HARD,
-                video_path="plots/dagger_hard.mp4", video_episodes=3)
-            print(f"    DAgger (video eval): {dagger_eval_m:.1f} ± "
-                  f"{dagger_eval_s:.1f}")
+        dagger_eval_m, dagger_eval_s = evaluate_policy(
+            dagger_policy, "hard", num_episodes=100,
+            seed=EVAL_SEED_HARD,
+            video_path=f"{seed_dir}/dagger_hard.mp4", video_episodes=3)
+        print(f"    DAgger (video eval): {dagger_eval_m:.1f} ± "
+              f"{dagger_eval_s:.1f}")
+
+
+        # --- BC (MSE regression) ---
+        print("\n  Training BC (MSE regression)...")
+        bc_hard = train_bc_policy(
+            hard_states, hard_actions, epochs=80, verbose=True)
+        m, s = evaluate_policy(
+            bc_hard, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
+            video_path=f"{seed_dir}/bc_hard.mp4", video_episodes=3)
+        bc_hard_means.append(m)
+        print(f"    BC: {m:.1f} ± {s:.1f}")
+
+        # --- Diffusion ---
+        print("\n  Training Diffusion policy...")
+        diff_hard = train_diffusion_policy(
+            hard_states, hard_actions, epochs=50,
+            T=NUM_DIFFUSION_ITERS, batch_size=2048, verbose=True)
+        m, s = evaluate_policy(
+            diff_hard, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
+            video_path=f"{seed_dir}/diffusion_hard.mp4", video_episodes=3)
+        diff_hard_means.append(m)
+        print(f"    Diffusion: {m:.1f} ± {s:.1f}")
+
+        # --- Gaussian BC (NLL, learned variance) ---
+        print("\n  Training Gaussian BC (NLL)...")
+        gauss_hard = train_gaussian_bc_policy(
+            hard_states, hard_actions, epochs=80, verbose=True)
+
+        gauss_det = GaussianWrapper(gauss_hard, stochastic=False)
+        m, s = evaluate_policy(
+            gauss_det, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
+            video_path=f"{seed_dir}/gauss_det_hard.mp4", video_episodes=3)
+        gauss_det_means.append(m)
+        print(f"    Gauss (det): {m:.1f} ± {s:.1f}")
+
+        gauss_stoch = GaussianWrapper(gauss_hard, stochastic=True)
+        m, s = evaluate_policy(
+            gauss_stoch, "hard", num_episodes=50, seed=EVAL_SEED_HARD,
+            video_path=f"{seed_dir}/gauss_stoch_hard.mp4", video_episodes=3)
+        gauss_stoch_means.append(m)
+        print(f"    Gauss (stoch): {m:.1f} ± {s:.1f}")
 
         if si == NUM_SEEDS - 1:
             torch.save(bc_hard.state_dict(), "models/bc_hard_chunk.pt")
@@ -998,6 +1064,34 @@ def main():
             torch.save(gauss_hard.state_dict(), "models/gauss_hard_chunk.pt")
             torch.save(dagger_policy.state_dict(),
                        "models/dagger_hard_chunk.pt")
+
+        # --- Per-seed comparison chart ---
+        fig, ax = plt.subplots(figsize=(14, 6))
+        methods = ['BC MSE\n(det)', 'Gauss NLL\n(det)', 'Gauss NLL\n(stoch)',
+                   'Diffusion\n(DDPM)', 'DAgger\n(upper gap)']
+        seed_vals = [bc_hard_means[-1], gauss_det_means[-1],
+                     gauss_stoch_means[-1], diff_hard_means[-1],
+                     dagger_final_means[-1]]
+        colors_bar = ['C0', 'C3', 'C4', 'C1', 'C2']
+        bars = ax.bar(methods, seed_vals, color=colors_bar, alpha=0.8,
+                      edgecolor='black', linewidth=2)
+        ax.set_ylabel('Avg Episode Length (hard mode)', fontsize=12)
+        ax.set_title(f'Five Approaches — Seed {seed}',
+                     fontsize=14, fontweight='bold')
+        ax.set_ylim(0, 1200)
+        ax.axhline(1000, color='gray', linestyle=':', linewidth=1,
+                   alpha=0.5, label='Max steps (1000)')
+        for bar, val in zip(bars, seed_vals):
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2., h + 15,
+                    f'{val:.0f}', ha='center', va='bottom',
+                    fontsize=11, fontweight='bold')
+        ax.legend(fontsize=11, loc='upper left')
+        ax.grid(True, alpha=0.3, axis='y')
+        plt.tight_layout()
+        plt.savefig(f'{seed_dir}/five_way_comparison.png', dpi=150)
+        plt.close()
+        print(f"    Saved: {seed_dir}/five_way_comparison.png")
 
     # --- Aggregate across seeds ---
     bc_hard_mean = np.mean(bc_hard_means)
@@ -1050,11 +1144,12 @@ def main():
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('plots/dagger_hard_curve.png', dpi=150)
-    print("  Saved: plots/dagger_hard_curve.png")
+    plt.savefig('plots/hard_mode/dagger_hard_curve.png', dpi=150)
+    plt.close()
+    print("  Saved: plots/hard_mode/dagger_hard_curve.png")
 
-    # --- Five-way comparison bar chart ---
-    print("\nCreating five-way comparison chart...")
+    # --- Five-way comparison bar chart (aggregated) ---
+    print("\nCreating aggregated five-way comparison chart...")
     fig, ax = plt.subplots(figsize=(14, 6))
     methods = ['BC MSE\n(det)', 'Gauss NLL\n(det)', 'Gauss NLL\n(stoch)',
                'Diffusion\n(DDPM)', 'DAgger\n(upper gap)']
@@ -1080,8 +1175,9 @@ def main():
     ax.legend(fontsize=11, loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig('plots/five_way_comparison.png', dpi=150)
-    print("  Saved: plots/five_way_comparison.png")
+    plt.savefig('plots/hard_mode/five_way_comparison.png', dpi=150)
+    plt.close()
+    print("  Saved: plots/hard_mode/five_way_comparison.png")
 
     # ================================================================
     # PART 3: Easy mode sanity check — BC & Diffusion both work
@@ -1119,6 +1215,7 @@ def main():
     diff_easy_std = np.std(diff_easy_means)
 
     # Bar chart: BC vs Diffusion on easy and hard
+    os.makedirs("plots/easy_mode", exist_ok=True)
     fig, ax = plt.subplots(figsize=(10, 6))
     x = np.arange(2)
     width = 0.35
@@ -1149,8 +1246,9 @@ def main():
     ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig('plots/bc_vs_diffusion.png', dpi=150)
-    print(f"\n  Saved: plots/bc_vs_diffusion.png")
+    plt.savefig('plots/easy_mode/bc_vs_diffusion.png', dpi=150)
+    plt.close()
+    print(f"\n  Saved: plots/easy_mode/bc_vs_diffusion.png")
 
     # ================================================================
     # SUMMARY
@@ -1180,15 +1278,17 @@ def main():
     print(f"  BC  on easy: {bc_easy_mean:.1f} ± {bc_easy_std:.1f}")
     print(f"  Diff on easy: {diff_easy_mean:.1f} ± {diff_easy_std:.1f}")
 
-    print("\nPlots saved:")
-    print("  - plots/bc_vs_diffusion.png")
-    print("  - plots/dagger_hard_curve.png")
-    print("  - plots/five_way_comparison.png")
-    print("\nVideos saved (from first seed):")
-    print("  - plots/expert_hard.mp4")
-    print("  - plots/bc_hard.mp4, plots/diffusion_hard.mp4, "
-          "plots/dagger_hard.mp4")
-    print("  - plots/gauss_det_hard.mp4, plots/gauss_stoch_hard.mp4")
+    print("\nAggregated plots:")
+    print("  - plots/hard_mode/five_way_comparison.png")
+    print("  - plots/hard_mode/dagger_hard_curve.png")
+    print("  - plots/easy_mode/bc_vs_diffusion.png")
+    print(f"\nPer-seed outputs (plots/hard_mode/seed_*):")
+    for seed in SEEDS:
+        print(f"  seed_{seed}/: five_way_comparison.png, "
+              "bc_hard.mp4, diffusion_hard.mp4, "
+              "gauss_det_hard.mp4, gauss_stoch_hard.mp4, dagger_hard.mp4, "
+              "dagger_round_*.mp4")
+    print("\nExpert video: plots/hard_mode/expert_hard.mp4")
     print("=" * 60)
 
 
