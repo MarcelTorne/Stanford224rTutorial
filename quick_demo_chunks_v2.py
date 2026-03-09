@@ -14,12 +14,13 @@ During rollout, only the first ACTION_CHUNK//2 are executed before re-predicting
 Usage:
     srun --qos=high --gres=gpu:1 --pty bash
     conda activate flow-dpo
-    python quick_demo_chunks.py
+    python quick_demo_chunks_v2.py
 """
 
 import math
 import os
 import time
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
@@ -890,20 +891,29 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed):
 
 
 def run_dagger(difficulty, initial_states, initial_actions, rounds,
-               episodes_per_round, epochs, pipe_speed, lr, seed,
-               eval_episodes=100, verbose=False):
-    """Run DAgger training loop with automatic relabeling."""
+               episodes_per_round, epochs, pipe_speed, seed,
+               eval_episodes=100, lr=1e-3, verbose=False, initial_policy=None):
+    """Run DAgger training loop with automatic relabeling.
+
+    If *initial_policy* is provided it is used for evaluation and rollout
+    in the first round (skipping a redundant BC training step).  In every
+    subsequent round the policy is retrained on the aggregated data.
+    """
     all_states = initial_states.copy()
     all_actions = initial_actions.copy()
     performance_means = []
     performance_stds = []
+    policy = initial_policy
 
     for rnd in range(1, rounds + 1):
-        print(f"  Round {rnd}/{rounds}: Training on {len(all_states)} "
-              f"transitions...")
-
-        policy = train_bc_policy(all_states, all_actions, epochs=epochs,
-                                 verbose=verbose, batch_size=BC_BATCH_SIZE, lr=lr)
+        if policy is None:
+            print(f"  Round {rnd}/{rounds}: Training on {len(all_states)} "
+                  f"transitions...")
+            policy = train_bc_policy(all_states, all_actions, epochs=epochs,
+                                     verbose=verbose, batch_size=BC_BATCH_SIZE, lr=lr)
+        else:
+            print(f"  Round {rnd}/{rounds}: Using {'pretrained' if rnd == 1 else 'retrained'} "
+                  f"policy ({len(all_states)} transitions in dataset)")
 
         avg_len, std_len = evaluate_policy(
             policy, difficulty, num_episodes=eval_episodes,
@@ -924,6 +934,11 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
             all_states = np.concatenate([new_states], axis=0)
             all_actions = np.concatenate([new_actions], axis=0)
 
+        print(f"  Round {rnd}/{rounds}: Retraining on {len(all_states)} "
+              f"transitions...")
+        policy = train_bc_policy(all_states, all_actions, epochs=epochs,
+                                 verbose=verbose, batch_size=BC_BATCH_SIZE, lr=lr)
+
     return policy, performance_means, performance_stds
 
 
@@ -932,9 +947,15 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
 # ---------------------------------------------------------------------------
 
 def main():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plots_dir = f"plots/{timestamp}"
+    models_dir = f"models/{timestamp}"
     os.makedirs("data", exist_ok=True)
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("plots", exist_ok=True)
+    os.makedirs(models_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+    print(f"Run timestamp: {timestamp}")
+    print(f"  Plots  -> {plots_dir}/")
+    print(f"  Models -> {models_dir}/")
 
     # ================================================================
     # PART 1: Hard mode — BC regression vs Diffusion (bimodal demo)
@@ -958,7 +979,7 @@ def main():
     expert_hard_mean, expert_hard_std = evaluate_policy(
         expert_hard, "hard", num_episodes=10, seed=500,
         use_chunks=False,
-        video_path="plots/expert_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/expert_hard.mp4", video_episodes=3)
     print(f"    Expert hard: {expert_hard_mean:.1f} ± "
           f"{expert_hard_std:.1f} avg steps")
 
@@ -970,13 +991,14 @@ def main():
     print("    Evaluating BC on hard mode (100 episodes)...")
     bc_hard_mean, bc_hard_std = evaluate_policy(
         bc_hard, "hard", num_episodes=50, seed=500,
-        video_path="plots/bc_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/bc_hard.mp4", video_episodes=3)
     print(f"    BC  (regression): {bc_hard_mean:.1f} ± "
           f"{bc_hard_std:.1f} avg steps")
 
 
-    # 2a. Run DAgger starting from the SAME bimodal expert data
-    print("2a. Running DAgger on hard mode (expert always -> upper gap)...")
+    # 2a. Run DAgger starting from the pretrained BC policy
+    print("2a. Running DAgger on hard mode (starting from pretrained BC, "
+          "expert always -> upper gap)...")
     dagger_policy, dagger_means, dagger_stds = run_dagger(
         difficulty="hard",
         initial_states=hard_states,
@@ -985,10 +1007,10 @@ def main():
         episodes_per_round=30,
         epochs=BC_EPOCHS,
         pipe_speed=PIPE_SPEED,
-        lr=BC_LR,
         seed=5000,
         eval_episodes=50,
         verbose=True,
+        initial_policy=bc_hard,
     )
     dagger_hard_mean = dagger_means[-1]
     dagger_hard_std = dagger_stds[-1]
@@ -1003,7 +1025,7 @@ def main():
 
     diff_hard_mean, diff_hard_std = evaluate_policy(
         diff_hard, "hard", num_episodes=50, seed=500,
-        video_path="plots/diffusion_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/diffusion_hard.mp4", video_episodes=3)
     print(f"    Diffusion:        {diff_hard_mean:.1f} ± "
           f"{diff_hard_std:.1f} avg steps")
 
@@ -1016,7 +1038,7 @@ def main():
     gauss_det = GaussianWrapper(gauss_hard, stochastic=False)
     gauss_det_mean, gauss_det_std = evaluate_policy(
         gauss_det, "hard", num_episodes=50, seed=500,
-        video_path="plots/gauss_det_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/gauss_det_hard.mp4", video_episodes=3)
     print(f"    Gauss (det):      {gauss_det_mean:.1f} ± "
           f"{gauss_det_std:.1f} avg steps")
 
@@ -1024,14 +1046,14 @@ def main():
     gauss_stoch = GaussianWrapper(gauss_hard, stochastic=True)
     gauss_stoch_mean, gauss_stoch_std = evaluate_policy(
         gauss_stoch, "hard", num_episodes=50, seed=500,
-        video_path="plots/gauss_stoch_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/gauss_stoch_hard.mp4", video_episodes=3)
     print(f"    Gauss (stoch):    {gauss_stoch_mean:.1f} ± "
           f"{gauss_stoch_std:.1f} avg steps")
 
     # 1e. Save models
-    torch.save(bc_hard.state_dict(), "models/bc_hard_chunk.pt")
-    torch.save(diff_hard.state_dict(), "models/diffusion_hard_chunk.pt")
-    torch.save(gauss_hard.state_dict(), "models/gauss_hard_chunk.pt")
+    torch.save(bc_hard.state_dict(), f"{models_dir}/bc_hard_chunk.pt")
+    torch.save(diff_hard.state_dict(), f"{models_dir}/diffusion_hard_chunk.pt")
+    torch.save(gauss_hard.state_dict(), f"{models_dir}/gauss_hard_chunk.pt")
 
     # ================================================================
     # PART 2: Hard mode — DAgger resolves bimodal ambiguity
@@ -1066,8 +1088,8 @@ def main():
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('plots/dagger_hard_curve.png', dpi=150)
-    print("  Saved: plots/dagger_hard_curve.png")
+    plt.savefig(f'{plots_dir}/dagger_hard_curve.png', dpi=150)
+    print(f"  Saved: {plots_dir}/dagger_hard_curve.png")
 
     # 2c. Five-way comparison bar chart
     print("\n2c. Creating five-way comparison chart...")
@@ -1096,15 +1118,15 @@ def main():
     ax.legend(fontsize=11, loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig('plots/five_way_comparison.png', dpi=150)
-    print("  Saved: plots/five_way_comparison.png")
+    plt.savefig(f'{plots_dir}/five_way_comparison.png', dpi=150)
+    print(f"  Saved: {plots_dir}/five_way_comparison.png")
 
     # 2d. Evaluate DAgger (with video) and save model
-    torch.save(dagger_policy.state_dict(), "models/dagger_hard_chunk.pt")
+    torch.save(dagger_policy.state_dict(), f"{models_dir}/dagger_hard_chunk.pt")
     print("\n2d. Evaluating DAgger (with video)...")
     dagger_eval_mean, dagger_eval_std = evaluate_policy(
         dagger_policy, "hard", num_episodes=100, seed=500,
-        video_path="plots/dagger_hard.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/dagger_hard.mp4", video_episodes=3)
     print(f"    DAgger: {dagger_eval_mean:.1f} ± "
           f"{dagger_eval_std:.1f} avg steps")
 
@@ -1167,8 +1189,8 @@ def main():
     ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig('plots/bc_vs_diffusion.png', dpi=150)
-    print("\n  Saved: plots/bc_vs_diffusion.png")
+    plt.savefig(f'{plots_dir}/bc_vs_diffusion.png', dpi=150)
+    print(f"\n  Saved: {plots_dir}/bc_vs_diffusion.png")
 
     # ================================================================
     # SUMMARY
@@ -1198,15 +1220,16 @@ def main():
     print(f"  BC  on easy: {bc_easy_mean:.1f} +/- {bc_easy_std:.1f}")
     print(f"  Diff on easy: {diff_easy_mean:.1f} +/- {diff_easy_std:.1f}")
 
-    print("\nPlots saved:")
-    print("  - plots/bc_vs_diffusion.png")
-    print("  - plots/dagger_hard_curve.png")
-    print("  - plots/five_way_comparison.png")
-    print("\nVideos saved:")
-    print("  - plots/expert_hard.mp4")
-    print("  - plots/bc_hard.mp4, plots/diffusion_hard.mp4, "
-          "plots/dagger_hard.mp4")
-    print("  - plots/gauss_det_hard.mp4, plots/gauss_stoch_hard.mp4")
+    print(f"\nRun timestamp: {timestamp}")
+    print(f"\nPlots saved to {plots_dir}/:")
+    print("  - bc_vs_diffusion.png")
+    print("  - dagger_hard_curve.png")
+    print("  - five_way_comparison.png")
+    print(f"\nVideos saved to {plots_dir}/:")
+    print("  - expert_hard.mp4")
+    print("  - bc_hard.mp4, diffusion_hard.mp4, dagger_hard.mp4")
+    print("  - gauss_det_hard.mp4, gauss_stoch_hard.mp4")
+    print(f"\nModels saved to {models_dir}/")
     print("=" * 60)
 
 
