@@ -4,6 +4,7 @@ Provided:
     - SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock,
       ConditionalResidualBlock1D, ConditionalUnet1D, TemporalNoisePredictor
     - DDPMSchedule (lightweight DDPM forward/reverse process)
+    - FlowMatchingSchedule (conditional OT flow matching with Euler sampler)
 
 TODO (students implement):
     - BCPolicy: simple MLP for behavior cloning
@@ -276,6 +277,62 @@ class DDPMSchedule:
             x = (1.0 / alpha.sqrt()) * (x - (beta / (1.0 - alpha_bar).sqrt()) * pred_noise)
             if t_val > 0:
                 x = x + beta.sqrt() * torch.randn_like(x)
+        return x.clamp(0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Flow Matching schedule (conditional OT, Euler ODE sampler)
+# ---------------------------------------------------------------------------
+
+class FlowMatchingSchedule:
+    """Conditional Optimal-Transport Flow Matching.
+
+    Forward process (linear interpolation):
+        x_t = (1 - t) * noise + t * x_1     for t in [0, 1]
+
+    Target velocity:
+        v = x_1 - noise
+
+    The network learns v_theta(x_t, state, t) ≈ v.
+    Sampling integrates the learned velocity from t=0 (noise) to t=1 (data)
+    using Euler steps.
+
+    Uses the same TemporalNoisePredictor architecture as DDPM -- the only
+    difference is what the network predicts and how samples are generated.
+    """
+
+    def __init__(self, action_dim=1, device='cpu', num_steps=20):
+        self.action_dim = action_dim
+        self.device = device
+        self.num_steps = num_steps
+
+    def interpolate(self, x1, t):
+        """Build noisy sample and target velocity for training.
+
+        Args:
+            x1: clean data, shape (B, action_dim).
+            t: timesteps in [0, 1], shape (B,).
+
+        Returns:
+            (x_t, velocity_target) where velocity_target = x1 - noise.
+        """
+        noise = torch.randn_like(x1)
+        t_expanded = t.unsqueeze(-1)
+        x_t = (1.0 - t_expanded) * noise + t_expanded * x1
+        velocity = x1 - noise
+        return x_t, velocity
+
+    @torch.no_grad()
+    def sample(self, model, state):
+        """Generate samples via Euler ODE integration from t=0 to t=1."""
+        batch = state.size(0)
+        device = state.device
+        x = torch.randn(batch, self.action_dim, device=device)
+        dt = 1.0 / self.num_steps
+        for i in range(self.num_steps):
+            t = torch.full((batch,), i * dt, device=device, dtype=torch.float32)
+            v = model(x, state, t)
+            x = x + v * dt
         return x.clamp(0.0, 1.0)
 
 

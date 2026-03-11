@@ -5,6 +5,7 @@ All code in this file is fully provided -- no TODOs.
 Contents:
     - ExpertWrapper: wraps Expert for the evaluate_policy interface.
     - DiffusionWrapper: wraps (model, schedule) for the same interface.
+    - FlowMatchingWrapper: wraps (model, schedule) for flow matching.
     - GaussianWrapper: wraps GaussianBCPolicy (det or stochastic).
     - ChunkExecutor: receding-horizon action-chunk execution.
     - _draw_chunk_overlay: overlay predicted targets on video frames.
@@ -54,6 +55,24 @@ class ExpertWrapper:
 
 class DiffusionWrapper:
     """Wrap (model, schedule) so it has the same call interface as BCPolicy."""
+
+    def __init__(self, model, schedule):
+        self.model = model
+        self.schedule = schedule
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def __call__(self, state):
+        return self.schedule.sample(self.model, state)
+
+    def state_dict(self):
+        return self.model.state_dict()
+
+
+class FlowMatchingWrapper:
+    """Wrap (model, schedule) for flow matching -- same interface as DiffusionWrapper."""
 
     def __init__(self, model, schedule):
         self.model = model

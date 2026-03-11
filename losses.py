@@ -1,9 +1,10 @@
 """Loss functions for imitation learning.
 
-TODO (students implement all three):
+TODO (students implement all four):
     - bc_loss: MSE regression loss for behavior cloning.
     - gaussian_nll_loss: Negative log-likelihood for Gaussian BC.
     - diffusion_loss: MSE loss between predicted and true noise.
+    - flow_matching_loss: MSE loss between predicted and target velocity.
 """
 
 import torch
@@ -54,3 +55,17 @@ def diffusion_loss(pred_noise: torch.Tensor,
         Scalar MSE loss (mean over batch and action dimensions).
     """
     return nn.MSELoss()(pred_noise, target_noise)
+
+
+def flow_matching_loss(pred_velocity: torch.Tensor,
+                       target_velocity: torch.Tensor) -> torch.Tensor:
+    """Compute the flow matching loss (MSE on velocity prediction).
+
+    Args:
+        pred_velocity: velocity predicted by the network, shape (B, action_dim).
+        target_velocity: target velocity (x_1 - noise), shape (B, action_dim).
+
+    Returns:
+        Scalar MSE loss (mean over batch and action dimensions).
+    """
+    return nn.MSELoss()(pred_velocity, target_velocity)
