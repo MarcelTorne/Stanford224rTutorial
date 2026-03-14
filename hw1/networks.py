@@ -3,12 +3,12 @@
 Provided:
     - SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock,
       ConditionalResidualBlock1D, ConditionalUnet1D, TemporalNoisePredictor
-    - DDPMSchedule (lightweight DDPM forward/reverse process)
-    - FlowMatchingSchedule (conditional OT flow matching with Euler sampler)
+    - DiffusionPolicy, FlowMatchingPolicy
+    - DDPMSchedule, FlowMatchingSchedule
+    - GaussianBCPolicy (bonus reference -- not required)
 
 TODO (students implement):
     - BCPolicy: simple MLP for behavior cloning
-    - GaussianBCPolicy: MLP with mean + learned log-variance heads
 """
 
 import math
@@ -212,11 +212,7 @@ class ConditionalUnet1D(nn.Module):
 
 
 class TemporalNoisePredictor(nn.Module):
-    """Wraps ConditionalUnet1D to match the (B, action_dim) interface.
-
-    Reshapes the flat action vector (B, K) into (B, K, 1) for the U-Net,
-    and flattens the output back to (B, K).
-    """
+    """Wraps ConditionalUnet1D to match the (B, action_dim) interface."""
 
     def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
                  **unet_kwargs):
@@ -234,44 +230,6 @@ class TemporalNoisePredictor(nn.Module):
         x = noisy_action.view(B, self.pred_horizon, self.action_dim)
         out = self.unet(x, timestep, global_cond=state)
         return out.reshape(B, -1)
-
-
-class DiffusionPolicy(nn.Module):
-    """TemporalNoisePredictor + DDPMSchedule bundled together."""
-
-    def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
-                 T=100, beta_start=0.0001, beta_end=0.02, device='cpu'):
-        super().__init__()
-        self.model = TemporalNoisePredictor(
-            state_dim=state_dim, pred_horizon=pred_horizon,
-            action_dim=action_dim,
-        )
-        self.schedule = DDPMSchedule(
-            T=T, beta_start=beta_start, beta_end=beta_end,
-            device=device, action_dim=pred_horizon,
-        )
-        self.T = T
-
-    def forward(self, noisy_action, state, timestep):
-        return self.model(noisy_action, state, timestep)
-
-
-class FlowMatchingPolicy(nn.Module):
-    """TemporalNoisePredictor + FlowMatchingSchedule bundled together."""
-
-    def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
-                 num_steps=20, device='cpu'):
-        super().__init__()
-        self.model = TemporalNoisePredictor(
-            state_dim=state_dim, pred_horizon=pred_horizon,
-            action_dim=action_dim,
-        )
-        self.schedule = FlowMatchingSchedule(
-            action_dim=pred_horizon, device=device, num_steps=num_steps,
-        )
-
-    def forward(self, noisy_action, state, timestep):
-        return self.model(noisy_action, state, timestep)
 
 
 # ---------------------------------------------------------------------------
@@ -331,12 +289,9 @@ class FlowMatchingSchedule:
     Target velocity:
         v = x_1 - noise
 
-    The network learns v_theta(x_t, state, t) ≈ v.
+    The network learns v_theta(x_t, state, t) ~ v.
     Sampling integrates the learned velocity from t=0 (noise) to t=1 (data)
     using Euler steps.
-
-    Uses the same TemporalNoisePredictor architecture as DDPM -- the only
-    difference is what the network predicts and how samples are generated.
     """
 
     def __init__(self, action_dim=1, device='cpu', num_steps=20):
@@ -345,15 +300,7 @@ class FlowMatchingSchedule:
         self.num_steps = num_steps
 
     def interpolate(self, x1, t):
-        """Build noisy sample and target velocity for training.
-
-        Args:
-            x1: clean data, shape (B, action_dim).
-            t: timesteps in [0, 1], shape (B,).
-
-        Returns:
-            (x_t, velocity_target) where velocity_target = x1 - noise.
-        """
+        """Build noisy sample and target velocity for training."""
         noise = torch.randn_like(x1)
         t_expanded = t.unsqueeze(-1)
         x_t = (1.0 - t_expanded) * noise + t_expanded * x1
@@ -375,13 +322,55 @@ class FlowMatchingSchedule:
 
 
 # ---------------------------------------------------------------------------
+# Policy wrappers that bundle model + schedule
+# ---------------------------------------------------------------------------
+
+class DiffusionPolicy(nn.Module):
+    """TemporalNoisePredictor + DDPMSchedule bundled together."""
+
+    def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
+                 T=100, beta_start=0.0001, beta_end=0.02, device='cpu'):
+        super().__init__()
+        self.model = TemporalNoisePredictor(
+            state_dim=state_dim, pred_horizon=pred_horizon,
+            action_dim=action_dim,
+        )
+        self.schedule = DDPMSchedule(
+            T=T, beta_start=beta_start, beta_end=beta_end,
+            device=device, action_dim=pred_horizon,
+        )
+        self.T = T
+
+    def forward(self, noisy_action, state, timestep):
+        return self.model(noisy_action, state, timestep)
+
+
+class FlowMatchingPolicy(nn.Module):
+    """TemporalNoisePredictor + FlowMatchingSchedule bundled together."""
+
+    def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
+                 num_steps=20, device='cpu'):
+        super().__init__()
+        self.model = TemporalNoisePredictor(
+            state_dim=state_dim, pred_horizon=pred_horizon,
+            action_dim=action_dim,
+        )
+        self.schedule = FlowMatchingSchedule(
+            action_dim=pred_horizon, device=device, num_steps=num_steps,
+        )
+
+    def forward(self, noisy_action, state, timestep):
+        return self.model(noisy_action, state, timestep)
+
+
+# ---------------------------------------------------------------------------
 # BC Policy  (TODO: students implement)
 # ---------------------------------------------------------------------------
 
 class BCPolicy(nn.Module):
     """Simple MLP for behavior cloning: state -> action.
 
-    Architecture (students must match exactly):
+    Architecture (you must match exactly):
         Linear(state_dim, hidden) -> ReLU
         Linear(hidden, hidden)    -> ReLU
         Linear(hidden, action_dim) -> Sigmoid
@@ -396,27 +385,27 @@ class BCPolicy(nn.Module):
 
     def __init__(self, state_dim: int = 4, action_dim: int = 1, hidden: int = 256):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, action_dim),
-            nn.Sigmoid(),
-        )
+        # ============================================================
+        # TODO: Define self.net as an nn.Sequential with the architecture
+        # described above: Linear -> ReLU -> Linear -> ReLU -> Linear -> Sigmoid
+        # ============================================================
+        raise NotImplementedError("TODO: Implement BCPolicy.__init__")
 
     def forward(self, state):
-        return self.net(state)
+        # ============================================================
+        # TODO: Pass state through self.net and return the result.
+        # ============================================================
+        raise NotImplementedError("TODO: Implement BCPolicy.forward")
 
 
 # ---------------------------------------------------------------------------
-# Gaussian BC Policy  (TODO: students implement)
+# Gaussian BC Policy (provided as bonus -- not required for the homework)
 # ---------------------------------------------------------------------------
 
 class GaussianBCPolicy(nn.Module):
     """MLP that outputs mean and log-variance for a Gaussian over actions.
 
-    Architecture (students must match exactly):
+    Architecture:
         backbone:
             Linear(state_dim, hidden) -> ReLU
             Linear(hidden, hidden)    -> ReLU
@@ -426,11 +415,6 @@ class GaussianBCPolicy(nn.Module):
             Linear(hidden, action_dim)          (no activation)
 
     forward(state) returns (mean, log_var).
-
-    Args:
-        state_dim: observation dimension (default 4).
-        action_dim: action dimension (default 1).
-        hidden: hidden layer width (default 256).
     """
 
     def __init__(self, state_dim=4, action_dim=1, hidden=256):

@@ -1,27 +1,24 @@
 """Main pipeline: imitation learning on Flappy Bird with action chunks.
 
-Part 1 -- Hard mode (two gaps): BC regression averages bimodal expert actions
-and crashes; Diffusion policy models the full distribution and succeeds.
+Part 1 -- Easy mode: BC regression works on unimodal expert data.
 
-Part 2 -- Hard mode (DAgger): starting from the same bimodal data, DAgger
-relabels with a deterministic expert (always upper gap), gradually resolving
-the ambiguity so BC regression succeeds.
+Part 2 -- Hard mode: BC regression averages bimodal expert actions and crashes.
 
-Part 3 -- Easy mode sanity check: both BC and Diffusion work on unimodal data.
+Part 3 -- Hard mode: Flow Matching models the full distribution and succeeds.
+
+Part 4 -- Hard mode (DAgger): starting from BC, DAgger relabels with a
+deterministic expert (always upper gap), resolving the ambiguity so BC succeeds.
 
 Action chunking: policies predict ACTION_CHUNK future target positions at once.
 During rollout, only the first EXECUTE_STEPS are executed before re-predicting
 (receding horizon).
 
 Usage:
-    srun --qos=high --gres=gpu:1 --pty bash
-    conda activate flow-dpo
-    python main.py                            # run full pipeline (all methods, all envs)
-    python main.py --method bc --env hard     # just BC on hard mode
-    python main.py --method diffusion --env easy
-    python main.py --method dagger --env hard # DAgger (trains BC first as prerequisite)
-    python main.py --method all --env hard    # all methods on hard mode
-    python main.py --method flow_matching --env easy
+    python main.py                              # run full pipeline
+    python main.py --method bc --env easy       # just BC on easy mode
+    python main.py --method bc --env hard       # BC on hard mode (observe failure)
+    python main.py --method flow_matching --env hard  # flow matching on hard
+    python main.py --method dagger --env hard   # DAgger on hard mode
 """
 
 import argparse
@@ -49,7 +46,7 @@ from visualization import (
 )
 
 # ---------------------------------------------------------------------------
-# Constants (match quick_demo_chunks_v2.py exactly)
+# Constants
 # ---------------------------------------------------------------------------
 BC_BATCH_SIZE = 2048
 BC_EPOCHS = 100
@@ -166,14 +163,15 @@ def train_flow_matching_policy(states, actions, epochs=100, batch_size=256,
 
 
 # ---------------------------------------------------------------------------
-# Individual run functions (one per method + env combination)
+# Individual run functions
 # ---------------------------------------------------------------------------
 
 def _collect_data(difficulty, plots_dir):
     """Collect expert data and evaluate the expert baseline."""
     print(f"\nCollecting {difficulty}-mode expert data...")
     states, actions = collect_expert_data(
-        difficulty, num_episodes=500, action_chunk=ACTION_CHUNK, seed=1 if difficulty == "hard" else 2000)
+        difficulty, num_episodes=500, action_chunk=ACTION_CHUNK,
+        seed=1 if difficulty == "hard" else 2000)
     print(f"    Collected {len(states)} chunk transitions")
 
     print(f"    Evaluating expert on {difficulty} (with video)...")
@@ -198,19 +196,6 @@ def run_bc(difficulty, states, actions, plots_dir, models_dir):
     return policy, mean, std
 
 
-def run_diffusion(difficulty, states, actions, plots_dir, models_dir):
-    print(f"\nTraining Diffusion policy on {difficulty} data...")
-    policy = train_diffusion_policy(
-        states, actions, epochs=50, T=NUM_DIFFUSION_ITERS,
-        batch_size=BC_BATCH_SIZE, verbose=True)
-    mean, std = evaluate_policy(
-        policy, difficulty, num_episodes=50, seed=500,
-        video_path=f"{plots_dir}/diffusion_{difficulty}.mp4", video_episodes=3)
-    print(f"    Diffusion on {difficulty}: {mean:.1f} +/- {std:.1f}")
-    torch.save(policy.state_dict(), f"{models_dir}/diffusion_{difficulty}_chunk.pt")
-    return policy, mean, std
-
-
 def run_flow_matching(difficulty, states, actions, plots_dir, models_dir):
     print(f"\nTraining Flow Matching policy on {difficulty} data...")
     policy = train_flow_matching_policy(
@@ -218,32 +203,12 @@ def run_flow_matching(difficulty, states, actions, plots_dir, models_dir):
         batch_size=BC_BATCH_SIZE, verbose=True)
     mean, std = evaluate_policy(
         policy, difficulty, num_episodes=50, seed=500,
-        video_path=f"{plots_dir}/flow_matching_{difficulty}.mp4", video_episodes=3)
+        video_path=f"{plots_dir}/flow_matching_{difficulty}.mp4",
+        video_episodes=3)
     print(f"    Flow Matching on {difficulty}: {mean:.1f} +/- {std:.1f}")
     torch.save(policy.state_dict(),
                f"{models_dir}/flow_matching_{difficulty}_chunk.pt")
     return policy, mean, std
-
-
-def run_gaussian(difficulty, states, actions, plots_dir, models_dir):
-    print(f"\nTraining Gaussian BC (NLL, learned variance) on {difficulty} data...")
-    policy = train_gaussian_bc_policy(
-        states, actions, epochs=BC_EPOCHS, lr=BC_LR, verbose=True)
-
-    gauss_det = GaussianWrapper(policy, stochastic=False)
-    det_mean, det_std = evaluate_policy(
-        gauss_det, difficulty, num_episodes=50, seed=500,
-        video_path=f"{plots_dir}/gauss_det_{difficulty}.mp4", video_episodes=3)
-    print(f"    Gauss (det) on {difficulty}: {det_mean:.1f} +/- {det_std:.1f}")
-
-    gauss_stoch = GaussianWrapper(policy, stochastic=True)
-    stoch_mean, stoch_std = evaluate_policy(
-        gauss_stoch, difficulty, num_episodes=50, seed=500,
-        video_path=f"{plots_dir}/gauss_stoch_{difficulty}.mp4", video_episodes=3)
-    print(f"    Gauss (stoch) on {difficulty}: {stoch_mean:.1f} +/- {stoch_std:.1f}")
-
-    torch.save(policy.state_dict(), f"{models_dir}/gauss_{difficulty}_chunk.pt")
-    return policy, det_mean, det_std, stoch_mean, stoch_std
 
 
 def run_dagger_method(difficulty, states, actions, bc_policy, plots_dir,
@@ -311,22 +276,19 @@ def _plot_dagger_curve(dagger_means, dagger_stds, bc_mean, bc_std, plots_dir):
     print(f"  Saved: {plots_dir}/dagger_hard_curve.png")
 
 
-def _plot_six_way(bc_mean, bc_std, gauss_det_mean, gauss_det_std,
-                  gauss_stoch_mean, gauss_stoch_std, diff_mean, diff_std,
-                  fm_mean, fm_std, dagger_mean, dagger_std, plots_dir):
-    fig, ax = plt.subplots(figsize=(16, 6))
-    methods = ['BC MSE\n(det)', 'Gauss NLL\n(det)', 'Gauss NLL\n(stoch)',
-               'Diffusion\n(DDPM)', 'Flow Match\n(OT-CFM)', 'DAgger\n(upper gap)']
-    values = [bc_mean, gauss_det_mean, gauss_stoch_mean, diff_mean, fm_mean,
-              dagger_mean]
-    errors = [bc_std, gauss_det_std, gauss_stoch_std, diff_std, fm_std,
-              dagger_std]
-    colors = ['C0', 'C3', 'C4', 'C1', 'C5', 'C2']
+def _plot_comparison(bc_mean, bc_std, fm_mean, fm_std,
+                     dagger_mean, dagger_std, plots_dir):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    methods = ['BC MSE\n(regression)', 'Flow Matching\n(OT-CFM)',
+               'DAgger\n(upper gap)']
+    values = [bc_mean, fm_mean, dagger_mean]
+    errors = [bc_std, fm_std, dagger_std]
+    colors = ['C0', 'C5', 'C2']
     bars = ax.bar(methods, values, yerr=errors, capsize=10,
                   color=colors, alpha=0.8, edgecolor='black', linewidth=2,
                   error_kw={'linewidth': 2, 'ecolor': 'black'})
     ax.set_ylabel('Avg Episode Length (hard mode)', fontsize=12)
-    ax.set_title('Six Approaches to Bimodal Expert Data',
+    ax.set_title('Three Approaches to Bimodal Expert Data',
                  fontsize=14, fontweight='bold')
     ax.set_ylim(0, 1200)
     ax.axhline(1000, color='gray', linestyle=':', linewidth=1, alpha=0.5,
@@ -339,47 +301,9 @@ def _plot_six_way(bc_mean, bc_std, gauss_det_mean, gauss_det_std,
     ax.legend(fontsize=11, loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
-    plt.savefig(f'{plots_dir}/six_way_comparison.png', dpi=150)
+    plt.savefig(f'{plots_dir}/comparison_hard.png', dpi=150)
     plt.close()
-    print(f"  Saved: {plots_dir}/six_way_comparison.png")
-
-
-def _plot_bc_vs_diffusion(bc_easy_mean, bc_easy_std, bc_hard_mean, bc_hard_std,
-                          diff_easy_mean, diff_easy_std, diff_hard_mean,
-                          diff_hard_std, plots_dir):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    x = np.arange(2)
-    width = 0.35
-    bc_means = [bc_easy_mean, bc_hard_mean]
-    bc_stds_plot = [bc_easy_std, bc_hard_std]
-    diff_means = [diff_easy_mean, diff_hard_mean]
-    diff_stds_plot = [diff_easy_std, diff_hard_std]
-
-    bars1 = ax.bar(x - width / 2, bc_means, width, yerr=bc_stds_plot,
-                   capsize=8, label='BC (regression)', color='C0',
-                   alpha=0.8, edgecolor='black')
-    bars2 = ax.bar(x + width / 2, diff_means, width, yerr=diff_stds_plot,
-                   capsize=8, label='Diffusion', color='C1',
-                   alpha=0.8, edgecolor='black')
-
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            h = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2., h + 15,
-                    f'{h:.0f}', ha='center', va='bottom', fontsize=11,
-                    fontweight='bold')
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(['Easy (1 gap)', 'Hard (2 gaps)'], fontsize=12)
-    ax.set_ylabel('Avg Episode Length', fontsize=12)
-    ax.set_title('BC Regression vs Diffusion Policy (Action Chunks)',
-                 fontsize=14, fontweight='bold')
-    ax.legend(fontsize=12)
-    ax.grid(True, alpha=0.3, axis='y')
-    plt.tight_layout()
-    plt.savefig(f'{plots_dir}/bc_vs_diffusion.png', dpi=150)
-    plt.close()
-    print(f"  Saved: {plots_dir}/bc_vs_diffusion.png")
+    print(f"  Saved: {plots_dir}/comparison_hard.png")
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +314,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Imitation learning on Flappy Bird with action chunks.")
     parser.add_argument("--method", type=str, default="all",
-                        choices=["bc", "diffusion", "flow_matching",
-                                 "gaussian", "dagger", "all"],
+                        choices=["bc", "flow_matching", "dagger", "all"],
                         help="Which method to run (default: all)")
     parser.add_argument("--env", type=str, default="all",
                         choices=["easy", "hard", "all"],
@@ -412,16 +335,13 @@ def main():
 
     run_all = args.method == "all"
     envs = ["easy", "hard"] if args.env == "all" else [args.env]
-    methods = (["bc", "diffusion", "flow_matching", "gaussian", "dagger"]
+    methods = (["bc", "flow_matching", "dagger"]
                if run_all else [args.method])
 
     results = {}
-    data_cache = {}
 
     for difficulty in envs:
-        # Collect expert data (shared across methods for same difficulty)
         states, actions = _collect_data(difficulty, plots_dir)
-        data_cache[difficulty] = (states, actions)
 
         bc_policy = None
 
@@ -431,21 +351,10 @@ def main():
             results[("bc", difficulty)] = (mean, std)
             bc_policy = policy
 
-        if "diffusion" in methods:
-            _, mean, std = run_diffusion(difficulty, states, actions,
-                                         plots_dir, models_dir)
-            results[("diffusion", difficulty)] = (mean, std)
-
         if "flow_matching" in methods:
             _, mean, std = run_flow_matching(difficulty, states, actions,
                                              plots_dir, models_dir)
             results[("flow_matching", difficulty)] = (mean, std)
-
-        if "gaussian" in methods:
-            _, det_mean, det_std, stoch_mean, stoch_std = run_gaussian(
-                difficulty, states, actions, plots_dir, models_dir)
-            results[("gaussian_det", difficulty)] = (det_mean, det_std)
-            results[("gaussian_stoch", difficulty)] = (stoch_mean, stoch_std)
 
         if "dagger" in methods:
             _, dag_means, dag_stds, final_mean, final_std = run_dagger_method(
@@ -453,38 +362,19 @@ def main():
             results[("dagger", difficulty)] = (final_mean, final_std)
 
             if difficulty == "hard":
-                bc_hard_for_curve = results.get(("bc", "hard"), (None, None))
-                if bc_hard_for_curve[0] is not None:
+                bc_hard = results.get(("bc", "hard"), (None, None))
+                if bc_hard[0] is not None:
                     _plot_dagger_curve(dag_means, dag_stds,
-                                       bc_hard_for_curve[0],
-                                       bc_hard_for_curve[1], plots_dir)
+                                       bc_hard[0], bc_hard[1], plots_dir)
 
-    # ----- Comparison plots (only when enough data is available) -----
-
-    hard_comparison_keys = [
-        ("bc", "hard"), ("gaussian_det", "hard"),
-        ("gaussian_stoch", "hard"), ("diffusion", "hard"),
-        ("flow_matching", "hard"), ("dagger", "hard"),
-    ]
-    if (run_all and "hard" in envs
-            and all(k in results for k in hard_comparison_keys)):
-        print("\nCreating six-way comparison chart...")
-        _plot_six_way(
+    # ----- Comparison plot -----
+    hard_keys = [("bc", "hard"), ("flow_matching", "hard"), ("dagger", "hard")]
+    if all(k in results for k in hard_keys):
+        print("\nCreating comparison chart...")
+        _plot_comparison(
             *results[("bc", "hard")],
-            *results[("gaussian_det", "hard")],
-            *results[("gaussian_stoch", "hard")],
-            *results[("diffusion", "hard")],
             *results[("flow_matching", "hard")],
             *results[("dagger", "hard")],
-            plots_dir)
-
-    if (all(k in results for k in [
-            ("bc", "easy"), ("bc", "hard"),
-            ("diffusion", "easy"), ("diffusion", "hard")])):
-        print("\nCreating BC vs Diffusion comparison chart...")
-        _plot_bc_vs_diffusion(
-            *results[("bc", "easy")], *results[("bc", "hard")],
-            *results[("diffusion", "easy")], *results[("diffusion", "hard")],
             plots_dir)
 
     # ----- Summary -----

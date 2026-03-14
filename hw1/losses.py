@@ -1,12 +1,10 @@
 """Loss functions for imitation learning.
 
-Each loss function takes the model, a batch of states, and a batch of expert
-actions, and returns a scalar loss.  This keeps the training loop generic.
+Each loss function takes the model/policy, a batch of states, and a batch of
+expert actions, and returns a scalar loss.
 
-TODO (students implement all four):
+TODO (students implement):
     - bc_loss: MSE regression loss for behavior cloning.
-    - gaussian_nll_loss: Negative log-likelihood for Gaussian BC.
-    - diffusion_loss: MSE loss between predicted and true noise.
     - flow_matching_loss: MSE loss between predicted and target velocity.
 """
 
@@ -18,16 +16,23 @@ def bc_loss(policy, s_batch: torch.Tensor,
             a_batch: torch.Tensor) -> torch.Tensor:
     """Compute the behavior cloning loss (MSE).
 
+    Steps:
+        1. Run the policy forward on s_batch to get predicted actions.
+        2. Compute MSE between predictions and a_batch.
+
     Args:
-        policy: BCPolicy network.
+        policy: BCPolicy network (callable: s_batch -> predicted actions).
         s_batch: states, shape (B, state_dim).
         a_batch: expert actions, shape (B, action_dim).
 
     Returns:
         Scalar MSE loss (mean over batch and action dimensions).
     """
-    pred = policy(s_batch)
-    return nn.MSELoss()(pred, a_batch)
+    # ============================================================
+    # TODO: Forward pass through policy, then compute MSE loss.
+    # Hint: nn.MSELoss()(pred, target)
+    # ============================================================
+    raise NotImplementedError("TODO: Implement bc_loss")
 
 
 def gaussian_nll_loss(policy, s_batch: torch.Tensor,
@@ -77,6 +82,12 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
 
     The policy (FlowMatchingPolicy) carries its own schedule.
 
+    Steps:
+        1. Sample random timesteps t ~ Uniform(0, 1) of shape (B,).
+        2. Use policy.schedule.interpolate(a_batch, t) to get (x_t, velocity).
+        3. Predict velocity: pred_v = policy(x_t, s_batch, t).
+        4. Return MSE between pred_v and velocity.
+
     Args:
         policy: FlowMatchingPolicy (model + schedule).
         s_batch: states, shape (B, state_dim).
@@ -85,8 +96,9 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
     Returns:
         Scalar MSE loss (mean over batch and action dimensions).
     """
-    bsz = s_batch.size(0)
-    t = torch.rand(bsz, device=s_batch.device)
-    x_t, velocity = policy.schedule.interpolate(a_batch, t)
-    pred_v = policy(x_t, s_batch, t)
-    return nn.MSELoss()(pred_v, velocity)
+    # ============================================================
+    # TODO: Implement flow matching loss.
+    # Hint: Sample t with torch.rand, use policy.schedule.interpolate,
+    #       predict with policy(x_t, s_batch, t), compute MSE.
+    # ============================================================
+    raise NotImplementedError("TODO: Implement flow_matching_loss")
