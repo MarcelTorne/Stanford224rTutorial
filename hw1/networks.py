@@ -289,9 +289,18 @@ class FlowMatchingSchedule:
     Target velocity:
         v = x_1 - noise
 
-    The network learns v_theta(x_t, state, t) ~ v.
+    The network learns v_theta(x_t, state, t) ≈ v.
     Sampling integrates the learned velocity from t=0 (noise) to t=1 (data)
     using Euler steps.
+
+    Compare with DDPMSchedule above to see how the two approaches differ.
+    DDPM adds scaled Gaussian noise and predicts that noise; flow matching
+    linearly interpolates between noise and data and predicts the velocity.
+
+    Args:
+        action_dim: dimensionality of the action (or prediction horizon).
+        device: torch device string.
+        num_steps: number of Euler integration steps for sampling.
     """
 
     def __init__(self, action_dim=1, device='cpu', num_steps=20):
@@ -300,25 +309,53 @@ class FlowMatchingSchedule:
         self.num_steps = num_steps
 
     def interpolate(self, x1, t):
-        """Build noisy sample and target velocity for training."""
-        noise = torch.randn_like(x1)
-        t_expanded = t.unsqueeze(-1)
-        x_t = (1.0 - t_expanded) * noise + t_expanded * x1
-        velocity = x1 - noise
-        return x_t, velocity
+        """Build noisy sample x_t and the target velocity for training.
+
+        Given clean data x_1 and timesteps t in [0, 1]:
+            1. Sample noise ~ N(0, I) with the same shape as x1.
+            2. Expand t to shape (B, 1) so it broadcasts with x1.
+            3. Compute x_t = (1 - t) * noise + t * x_1.
+            4. Compute velocity = x_1 - noise.
+
+        Args:
+            x1: clean action data, shape (B, action_dim).
+            t: timesteps in [0, 1], shape (B,).
+
+        Returns:
+            (x_t, velocity) where both have shape (B, action_dim).
+        """
+        # ============================================================
+        # TODO: Implement the flow matching interpolation.
+        # Hint: Compare with DDPMSchedule.q_sample above -- the idea is
+        #       similar but the interpolation formula and target differ.
+        # ============================================================
+        raise NotImplementedError("TODO: Implement FlowMatchingSchedule.interpolate")
 
     @torch.no_grad()
     def sample(self, model, state):
-        """Generate samples via Euler ODE integration from t=0 to t=1."""
-        batch = state.size(0)
-        device = state.device
-        x = torch.randn(batch, self.action_dim, device=device)
-        dt = 1.0 / self.num_steps
-        for i in range(self.num_steps):
-            t = torch.full((batch,), i * dt, device=device, dtype=torch.float32)
-            v = model(x, state, t)
-            x = x + v * dt
-        return x.clamp(0.0, 1.0)
+        """Generate samples via Euler ODE integration from t=0 to t=1.
+
+        Starting from pure noise x_0 ~ N(0, I):
+            for each step i = 0, 1, ..., num_steps - 1:
+                t = i / num_steps          (current time as a (B,) tensor)
+                v = model(x, state, t)     (predicted velocity)
+                x = x + v * dt             (Euler step, dt = 1 / num_steps)
+            return x clamped to [0, 1].
+
+        Args:
+            model: the velocity network, callable as model(x, state, t).
+            state: conditioning states, shape (B, state_dim).
+
+        Returns:
+            Sampled actions, shape (B, action_dim), clamped to [0, 1].
+        """
+        # ============================================================
+        # TODO: Implement Euler ODE sampling.
+        # Hint: Compare with DDPMSchedule.sample above. Flow matching
+        #       sampling is simpler -- just iterate Euler steps from t=0
+        #       to t=1. No alpha/beta schedule needed.
+        # ============================================================
+        raise NotImplementedError("TODO: Implement FlowMatchingSchedule.sample")
 
 
 # ---------------------------------------------------------------------------
