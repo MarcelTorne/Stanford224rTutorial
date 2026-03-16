@@ -3,12 +3,14 @@
 The expert outputs a target y position (normalised 0-1) for each timestep.
 The environment's internal PD controller converts the target into thrust.
 
-Provided:
-    - collect_expert_data(): collects expert demonstrations and windows them
-      into (state, action_chunk) training pairs.
+Structure:
+    Provided (read-only):
+        - collect_expert_data(): collects expert demonstrations and windows
+          them into (state, action_chunk) training pairs.
 
-TODO (students implement):
-    - Expert.act(): expert targeting logic for easy and hard modes.
+    TODO (students implement):
+        - Expert.act (Problem 1): expert targeting logic for easy and hard
+          modes. Read the class docstring for the expected behavior.
 """
 
 import numpy as np

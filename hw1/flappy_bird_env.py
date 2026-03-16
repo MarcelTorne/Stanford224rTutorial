@@ -1,11 +1,13 @@
 """Flappy Bird Gymnasium environment with easy and hard difficulty modes.
 
+This file is fully provided -- do not modify.
+
 Easy mode: each pipe has one gap opening.
 Hard mode: each pipe has two gap openings (bimodal expert demonstrations).
 
 Action space: target y position (normalised 0-1).
 The environment uses a PD controller to convert the target position into
-thrust, creating momentum-based physics.  With moderate PD gains the bird
+thrust, creating momentum-based physics. With moderate PD gains the bird
 tracks slowly, so faster pipes require more anticipation.
 
 Observation is always 4-D: [dist_to_pipe, gap1_y, gap2_y, bird_y] (normalised).

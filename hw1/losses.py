@@ -1,11 +1,18 @@
 """Loss functions for imitation learning.
 
 Each loss function takes the model/policy, a batch of states, and a batch of
-expert actions, and returns a scalar loss.
+expert actions, and returns a scalar loss. This signature keeps the training
+loop in main.py generic across all methods.
 
-TODO (students implement):
-    - bc_loss: MSE regression loss for behavior cloning.
-    - flow_matching_loss: MSE loss between predicted and target velocity.
+Structure:
+    Provided (read-only):
+        - gaussian_nll_loss: Gaussian NLL for the bonus GaussianBCPolicy.
+        - diffusion_loss: denoising loss for DDPM (reference implementation).
+
+    TODO (students implement):
+        - bc_loss (Problem 1): MSE regression loss for behavior cloning.
+        - flow_matching_loss (Problem 3): MSE loss between predicted and
+          target velocity. Compare with diffusion_loss for the pattern.
 """
 
 import torch

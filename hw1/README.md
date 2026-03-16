@@ -136,9 +136,9 @@ An interactive imitation learning algorithm that addresses distribution shift. E
 
 ## 7. Your Tasks
 
-Every function you need to implement is marked with `raise NotImplementedError("TODO: ...")`. Search for `TODO` across the codebase to find them all.
+Every function you need to implement is marked with `raise NotImplementedError("TODO: ...")`. Search for `TODO` across the codebase to find them all. Each TODO comment includes the problem number it corresponds to (e.g., "Problem 1", "Problem 3", "Problem 4").
 
-Look for sections marked with `HW1` in other files to see how your edits will be used. Some files you may find relevant for reference:
+Some files you may find relevant for reference:
 - [main.py](main.py) -- training pipeline and evaluation (read-only)
 - [visualization.py](visualization.py) -- evaluation and video utilities (read-only)
 

@@ -1,14 +1,19 @@
 """Neural network architectures for imitation learning.
 
-Provided:
-    - SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock,
-      ConditionalResidualBlock1D, ConditionalUnet1D, TemporalNoisePredictor
-    - DiffusionPolicy, FlowMatchingPolicy
-    - DDPMSchedule, FlowMatchingSchedule
-    - GaussianBCPolicy (bonus reference -- not required)
+This file contains all policy architectures and diffusion/flow schedules.
 
-TODO (students implement):
-    - BCPolicy: simple MLP for behavior cloning
+Structure:
+    Provided (read-only):
+        - SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock,
+          ConditionalResidualBlock1D, ConditionalUnet1D, TemporalNoisePredictor
+        - DiffusionPolicy, FlowMatchingPolicy (wrapper classes)
+        - DDPMSchedule (reference implementation -- compare with FlowMatchingSchedule)
+        - GaussianBCPolicy (bonus, not required)
+
+    TODO (students implement):
+        - BCPolicy (Problem 1): simple MLP for behavior cloning.
+        - FlowMatchingSchedule.interpolate (Problem 3): training-time interpolation.
+        - FlowMatchingSchedule.sample (Problem 3): inference-time sampling.
 """
 
 import math

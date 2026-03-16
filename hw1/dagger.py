@@ -1,18 +1,19 @@
 """DAgger (Dataset Aggregation) for resolving bimodal expert ambiguity.
 
 The key idea: roll out the current policy, but *relabel* each visited state
-with a deterministic expert that always picks the upper gap (gap1).  Over
+with a deterministic expert that always picks the upper gap (gap1). Over
 rounds the relabeled data resolves the bimodal ambiguity so that a simple
 BC policy can succeed on hard mode.
 
-Provided:
-    - DeterministicExpert class skeleton (with reset).
-    - run_dagger(): the full DAgger training loop.
+Structure:
+    Provided (read-only):
+        - DeterministicExpert class skeleton (with reset).
+        - run_dagger(): the full DAgger training loop.
 
-TODO (students implement):
-    - DeterministicExpert.act(): deterministic relabeling expert.
-    - rollout_and_relabel(): roll out policy, relabel with expert, window
-      into action chunks.
+    TODO (students implement):
+        - DeterministicExpert.act (Problem 4): deterministic relabeling expert.
+        - rollout_and_relabel (Problem 4): roll out policy, relabel with
+          expert, window into action chunks.
 """
 
 import numpy as np
@@ -165,8 +166,8 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         print(f"Got {len(new_states)} new transitions")
 
         if len(new_states) > 0:
-            all_states = np.concatenate([new_states], axis=0)
-            all_actions = np.concatenate([new_actions], axis=0)
+            all_states = np.concatenate([all_states, new_states], axis=0)
+            all_actions = np.concatenate([all_actions, new_actions], axis=0)
 
         print(f"  Round {rnd}/{rounds}: Retraining on {len(all_states)} "
               f"transitions...")
