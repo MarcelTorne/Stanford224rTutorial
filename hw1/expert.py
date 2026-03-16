@@ -65,25 +65,9 @@ class Expert:
 
         Returns:
             Target y position clipped to [0, 1].
-
-        Implementation guide:
-            1. Extract dist, gap1_y, gap2_y from obs.
-            2. Easy mode: raw_target = gap1_y.
-            3. Hard mode:
-               a. Detect new pipe: compute a signature from (gap1_y, gap2_y)
-                  rounded to 3 decimals. If it changed, reset commitment.
-               b. Compute midpoint = (gap1_y + gap2_y) / 2.
-               c. If not committed and dist < commit_dist:
-                  randomly pick target_gap_idx in {0, 1}, mark committed.
-               d. If not committed: raw_target = midpoint.
-               e. If committed: raw_target = gap1_y if idx==0 else gap2_y.
-            4. Apply EMA smoothing to raw_target.
-            5. Return clipped to [0, 1].
         """
         # ============================================================
         # TODO: Implement expert targeting logic.
-        # Extract obs[0], obs[1], obs[2]. Handle easy vs hard mode.
-        # Apply EMA smoothing. Return clipped result.
         # ============================================================
         raise NotImplementedError("TODO: Implement Expert.act")
 

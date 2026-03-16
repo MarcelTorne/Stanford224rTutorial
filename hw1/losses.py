@@ -16,10 +16,6 @@ def bc_loss(policy, s_batch: torch.Tensor,
             a_batch: torch.Tensor) -> torch.Tensor:
     """Compute the behavior cloning loss (MSE).
 
-    Steps:
-        1. Run the policy forward on s_batch to get predicted actions.
-        2. Compute MSE between predictions and a_batch.
-
     Args:
         policy: BCPolicy network (callable: s_batch -> predicted actions).
         s_batch: states, shape (B, state_dim).
@@ -29,8 +25,7 @@ def bc_loss(policy, s_batch: torch.Tensor,
         Scalar MSE loss (mean over batch and action dimensions).
     """
     # ============================================================
-    # TODO: Forward pass through policy, then compute MSE loss.
-    # Hint: nn.MSELoss()(pred, target)
+    # TODO: Implement bc_loss.
     # ============================================================
     raise NotImplementedError("TODO: Implement bc_loss")
 
@@ -82,12 +77,6 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
 
     The policy (FlowMatchingPolicy) carries its own schedule.
 
-    Steps:
-        1. Sample random timesteps t ~ Uniform(0, 1) of shape (B,).
-        2. Use policy.schedule.interpolate(a_batch, t) to get (x_t, velocity).
-        3. Predict velocity: pred_v = policy(x_t, s_batch, t).
-        4. Return MSE between pred_v and velocity.
-
     Args:
         policy: FlowMatchingPolicy (model + schedule).
         s_batch: states, shape (B, state_dim).
@@ -98,7 +87,5 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
     """
     # ============================================================
     # TODO: Implement flow matching loss.
-    # Hint: Sample t with torch.rand, use policy.schedule.interpolate,
-    #       predict with policy(x_t, s_batch, t), compute MSE.
     # ============================================================
     raise NotImplementedError("TODO: Implement flow_matching_loss")

@@ -281,26 +281,15 @@ class DDPMSchedule:
 # ---------------------------------------------------------------------------
 
 class FlowMatchingSchedule:
-    """Conditional Optimal-Transport Flow Matching.
+    """Conditional Optimal-Transport Flow Matching schedule.
 
-    Forward process (linear interpolation):
-        x_t = (1 - t) * noise + t * x_1     for t in [0, 1]
-
-    Target velocity:
-        v = x_1 - noise
-
-    The network learns v_theta(x_t, state, t) ≈ v.
-    Sampling integrates the learned velocity from t=0 (noise) to t=1 (data)
-    using Euler steps.
-
-    Compare with DDPMSchedule above to see how the two approaches differ.
-    DDPM adds scaled Gaussian noise and predicts that noise; flow matching
-    linearly interpolates between noise and data and predicts the velocity.
+    Implements the training-time interpolation and inference-time sampling
+    for a flow matching policy. Compare with DDPMSchedule above.
 
     Args:
         action_dim: dimensionality of the action (or prediction horizon).
         device: torch device string.
-        num_steps: number of Euler integration steps for sampling.
+        num_steps: number of integration steps for sampling.
     """
 
     def __init__(self, action_dim=1, device='cpu', num_steps=20):
@@ -311,12 +300,6 @@ class FlowMatchingSchedule:
     def interpolate(self, x1, t):
         """Build noisy sample x_t and the target velocity for training.
 
-        Given clean data x_1 and timesteps t in [0, 1]:
-            1. Sample noise ~ N(0, I) with the same shape as x1.
-            2. Expand t to shape (B, 1) so it broadcasts with x1.
-            3. Compute x_t = (1 - t) * noise + t * x_1.
-            4. Compute velocity = x_1 - noise.
-
         Args:
             x1: clean action data, shape (B, action_dim).
             t: timesteps in [0, 1], shape (B,).
@@ -326,21 +309,12 @@ class FlowMatchingSchedule:
         """
         # ============================================================
         # TODO: Implement the flow matching interpolation.
-        # Hint: Compare with DDPMSchedule.q_sample above -- the idea is
-        #       similar but the interpolation formula and target differ.
         # ============================================================
         raise NotImplementedError("TODO: Implement FlowMatchingSchedule.interpolate")
 
     @torch.no_grad()
     def sample(self, model, state):
-        """Generate samples via Euler ODE integration from t=0 to t=1.
-
-        Starting from pure noise x_0 ~ N(0, I):
-            for each step i = 0, 1, ..., num_steps - 1:
-                t = i / num_steps          (current time as a (B,) tensor)
-                v = model(x, state, t)     (predicted velocity)
-                x = x + v * dt             (Euler step, dt = 1 / num_steps)
-            return x clamped to [0, 1].
+        """Generate samples by integrating the learned velocity field.
 
         Args:
             model: the velocity network, callable as model(x, state, t).
@@ -350,10 +324,7 @@ class FlowMatchingSchedule:
             Sampled actions, shape (B, action_dim), clamped to [0, 1].
         """
         # ============================================================
-        # TODO: Implement Euler ODE sampling.
-        # Hint: Compare with DDPMSchedule.sample above. Flow matching
-        #       sampling is simpler -- just iterate Euler steps from t=0
-        #       to t=1. No alpha/beta schedule needed.
+        # TODO: Implement sampling for flow matching.
         # ============================================================
         raise NotImplementedError("TODO: Implement FlowMatchingSchedule.sample")
 
@@ -407,12 +378,7 @@ class FlowMatchingPolicy(nn.Module):
 class BCPolicy(nn.Module):
     """Simple MLP for behavior cloning: state -> action.
 
-    Architecture (you must match exactly):
-        Linear(state_dim, hidden) -> ReLU
-        Linear(hidden, hidden)    -> ReLU
-        Linear(hidden, action_dim) -> Sigmoid
-
-    The Sigmoid ensures output is in [0, 1] (normalised target y position).
+    Output should be in [0, 1] (normalised target y position).
 
     Args:
         state_dim: observation dimension (default 4).
@@ -423,14 +389,13 @@ class BCPolicy(nn.Module):
     def __init__(self, state_dim: int = 4, action_dim: int = 1, hidden: int = 256):
         super().__init__()
         # ============================================================
-        # TODO: Define self.net as an nn.Sequential with the architecture
-        # described above: Linear -> ReLU -> Linear -> ReLU -> Linear -> Sigmoid
+        # TODO: Implement BCPolicy.__init__
         # ============================================================
         raise NotImplementedError("TODO: Implement BCPolicy.__init__")
 
     def forward(self, state):
         # ============================================================
-        # TODO: Pass state through self.net and return the result.
+        # TODO: Implement BCPolicy.forward
         # ============================================================
         raise NotImplementedError("TODO: Implement BCPolicy.forward")
 

@@ -62,26 +62,9 @@ class DeterministicExpert:
 
         Returns:
             Target y clipped to [0, 1].
-
-        Implementation guide:
-            1. Extract dist, gap1_y, gap2_y from obs.
-            2. Detect new pipe: signature = (round(gap1_y, 3), round(gap2_y, 3)).
-               If changed from self._last_gap_sig, reset self._committed and
-               update self._last_gap_sig.
-            3. Compute midpoint = (gap1_y + gap2_y) / 2.
-            4. If not committed:
-               - If dist < commit_dist: commit, raw_target = gap1_y (always
-                 upper gap -- this is the key difference from the stochastic
-                 Expert).
-               - Else: raw_target = midpoint.
-            5. If committed: raw_target = gap1_y.
-            6. Apply EMA: if first call, smooth_target = raw_target; else
-               smooth_target += smoothing * (raw_target - smooth_target).
-            7. Return clipped to [0, 1].
         """
         # ============================================================
         # TODO: Implement deterministic expert (always picks gap1).
-        # Very similar to Expert.act but with deterministic gap choice.
         # ============================================================
         raise NotImplementedError("TODO: Implement DeterministicExpert.act")
 
@@ -90,15 +73,6 @@ class DeterministicExpert:
 def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed,
                         action_chunk, device):
     """Roll out policy with chunk execution, relabel with deterministic expert.
-
-    For each episode:
-        1. Reset environment and helpers.
-        2. Step through the episode using ChunkExecutor for the policy.
-        3. At every step, query DeterministicExpert for the *expert* action
-           (this is the relabeled action).
-        4. Record (state, expert_action) pairs.
-    After all episodes, window the per-step pairs into
-    (state, action_chunk) training pairs.
 
     Args:
         policy: trained policy (callable, takes (1, state_dim) tensor).
@@ -115,21 +89,6 @@ def rollout_and_relabel(policy, difficulty, num_episodes, pipe_speed, seed,
     """
     # ============================================================
     # TODO: Implement rollout and relabeling.
-    #
-    # Steps:
-    #   1. Set policy to eval mode, create env, ChunkExecutor,
-    #      DeterministicExpert.
-    #   2. For each episode:
-    #      a. Reset env, executor, expert.
-    #      b. Loop until done:
-    #         - If executor.needs_query(): get policy prediction, set chunk.
-    #         - Get expert action via det_expert.act(obs).
-    #         - Record (obs, expert_action).
-    #         - Step env with executor.get_action().
-    #      c. Window episode data into (state, action_chunk) pairs.
-    #   3. Return concatenated arrays.
-    #
-    # Hint: Look at collect_expert_data in expert.py for the windowing pattern.
     # ============================================================
     raise NotImplementedError("TODO: Implement rollout_and_relabel")
 
