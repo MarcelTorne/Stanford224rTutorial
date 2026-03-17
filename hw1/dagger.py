@@ -7,11 +7,12 @@ BC policy can succeed on hard mode.
 
 Structure:
     Provided (read-only):
-        - DeterministicExpert class skeleton (with reset).
+        - DeterministicExpert class skeleton, reset, and act scaffolding.
         - run_dagger(): the full DAgger training loop.
 
     TODO (students implement):
-        - DeterministicExpert.act (Problem 4): deterministic relabeling expert.
+        - DeterministicExpert.act gap choice (Problem 4): two small TODOs
+          inside the provided scaffolding -- set raw_target to gap1_y.
         - rollout_and_relabel (Problem 4): roll out policy, relabel with
           expert, window into action chunks.
 """
@@ -64,10 +65,42 @@ class DeterministicExpert:
         Returns:
             Target y clipped to [0, 1].
         """
-        # ============================================================
-        # TODO: Implement deterministic expert (always picks gap1).
-        # ============================================================
-        raise NotImplementedError("TODO: Implement DeterministicExpert.act")
+        dist = obs[0]
+        gap1_y = obs[1]
+        gap2_y = obs[2]
+
+        gap_sig = (round(gap1_y, 3), round(gap2_y, 3))
+        if self._last_gap_sig != gap_sig:
+            self._committed = False
+            self._last_gap_sig = gap_sig
+
+        midpoint = (gap1_y + gap2_y) / 2.0
+
+        if not self._committed:
+            if dist < self.commit_dist:
+                self._committed = True
+                # ======================================================
+                # TODO (Problem 4): Choose the target gap.
+                # The stochastic Expert randomly picks gap1 or gap2.
+                # For DAgger, always commit to gap1 (the upper gap).
+                # Set raw_target to the y-position of your chosen gap.
+                # ======================================================
+                raise NotImplementedError
+            else:
+                raw_target = float(midpoint)
+        else:
+            # ======================================================
+            # TODO (Problem 4): Set raw_target to the committed gap.
+            # ======================================================
+            raise NotImplementedError
+
+        if self._smooth_target is None:
+            self._smooth_target = raw_target
+        else:
+            self._smooth_target += self.smoothing * (
+                raw_target - self._smooth_target)
+
+        return float(np.clip(self._smooth_target, 0.0, 1.0))
 
 
 @torch.no_grad()
@@ -136,6 +169,8 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
     performance_means = []
     performance_stds = []
     policy = initial_policy
+    best_policy_state = None
+    best_mean = -float('inf')
 
     for rnd in range(1, rounds + 1):
         if policy is None:
@@ -157,6 +192,11 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         print(f"    Evaluation: {avg_len:.1f} +/- {std_len:.1f} avg length "
               f"({eval_episodes} episodes)")
 
+        if avg_len > best_mean:
+            best_mean = avg_len
+            best_policy_state = {k: v.clone()
+                                 for k, v in policy.state_dict().items()}
+
         print(f"    Collecting {episodes_per_round} episodes with "
               f"auto-relabeling...", end=" ", flush=True)
         new_states, new_actions = rollout_and_relabel(
@@ -174,5 +214,9 @@ def run_dagger(difficulty, initial_states, initial_actions, rounds,
         policy = train_bc_fn(all_states, all_actions, epochs=epochs,
                              verbose=verbose, batch_size=batch_size, lr=lr,
                              device=device)
+
+    if best_policy_state is not None:
+        policy.load_state_dict(best_policy_state)
+        print(f"  Restored best policy (eval {best_mean:.1f})")
 
     return policy, performance_means, performance_stds

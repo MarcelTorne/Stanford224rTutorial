@@ -19,18 +19,17 @@ Important: this is starter code for a class assignment. Core logic is intentiona
 
 Implemented (provided):
 - Flappy Bird Gymnasium environment with easy/hard modes and PD-controlled physics.
-- Expert data collection with action-chunk windowing.
+- Expert policy (`Expert.act`) and data collection with action-chunk windowing.
 - Full training pipeline orchestration, evaluation, and video recording.
 - Diffusion Policy, DDPM schedule, and U-Net architecture.
 - Gaussian BC policy architecture (bonus, not required).
-- DAgger outer loop (`run_dagger`).
+- DAgger outer loop (`run_dagger`) and `DeterministicExpert` scaffolding.
 - All visualization and policy wrapper utilities.
 
 Not implemented (you need to write these):
 - `networks.py`: `BCPolicy.__init__`, `BCPolicy.forward`, `FlowMatchingSchedule.interpolate`, and `FlowMatchingSchedule.sample` raise `NotImplementedError`.
 - `losses.py`: `bc_loss` and `flow_matching_loss` raise `NotImplementedError`.
-- `expert.py`: `Expert.act` raises `NotImplementedError`.
-- `dagger.py`: `DeterministicExpert.act` and `rollout_and_relabel` raise `NotImplementedError`.
+- `dagger.py`: `DeterministicExpert.act` gap choice (two small TODOs) and `rollout_and_relabel` raise `NotImplementedError`.
 
 ## 3. Flappy Bird Task Overview
 
@@ -79,8 +78,8 @@ Policies predict `ACTION_CHUNK=20` future target positions at once. During rollo
 ├── main.py                      # Training pipeline & CLI entrypoint (read-only)
 ├── networks.py                  # Network architectures               [TODO: BCPolicy, FlowMatchingSchedule]
 ├── losses.py                    # Loss functions                      [TODO: bc_loss, flow_matching_loss]
-├── expert.py                    # Expert policy + data collection     [TODO: Expert.act]
-├── dagger.py                    # DAgger relabeling + training loop   [TODO: DeterministicExpert.act, rollout_and_relabel]
+├── expert.py                    # Expert policy + data collection (read-only)
+├── dagger.py                    # DAgger relabeling + training loop   [TODO: DeterministicExpert gap choice, rollout_and_relabel]
 ├── flappy_bird_env.py           # Gymnasium environment (read-only)
 ├── visualization.py             # Evaluation, video, policy wrappers (read-only)
 │
@@ -146,11 +145,10 @@ See the homework PDF for more details.
 
 ### Part 1: Behavior Cloning on Easy Mode
 
-Files: `networks.py`, `losses.py`, `expert.py`
+Files: `networks.py`, `losses.py`
 
 1. **`BCPolicy.__init__`** and **`BCPolicy.forward`** in `networks.py`: build a 3-layer MLP with the architecture described in the docstring (Linear -> ReLU -> Linear -> ReLU -> Linear -> Sigmoid).
 2. **`bc_loss`** in `losses.py`: MSE between the policy's predicted actions and expert actions.
-3. **`Expert.act`** in `expert.py`: easy mode targets `gap1_y`; hard mode hovers at the midpoint of both gaps and randomly commits to one when within `commit_dist`; applies EMA smoothing.
 
 Verify:
 
@@ -190,7 +188,7 @@ Expected: ~800-1000 average episode length.
 
 File: `dagger.py`
 
-1. **`DeterministicExpert.act`**: same logic as `Expert.act` in hard mode but always picks gap1 (upper gap) instead of random selection. This is the key difference that makes DAgger resolve the bimodal ambiguity.
+1. **`DeterministicExpert.act`** (two small TODOs inside provided scaffolding): the scaffolding already handles pipe detection, midpoint hovering, and EMA smoothing -- you just need to set `raw_target` to always choose gap1 (upper gap) instead of randomly picking a gap. Read `Expert.act` in `expert.py` to see how the stochastic version works.
 2. **`rollout_and_relabel`**: roll out the current policy using `ChunkExecutor`, query `DeterministicExpert` at every step for the relabeled action, window results into action-chunk training pairs (follow the same windowing pattern as `collect_expert_data` in `expert.py`).
 
 Verify:
@@ -262,10 +260,10 @@ The critical insight: BC regression fails on hard mode because it averages two m
 
 ## 11. Milestones
 
-1. Implement `Expert.act`, `BCPolicy`, and `bc_loss`. Verify BC works on easy mode (~900-1000 steps).
+1. Implement `BCPolicy` and `bc_loss`. Verify BC works on easy mode (~900-1000 steps).
 2. Confirm BC fails on hard mode (~100-200 steps). Understand why MSE regression cannot handle bimodal data.
 3. Implement `FlowMatchingSchedule.interpolate`, `FlowMatchingSchedule.sample`, and `flow_matching_loss`. Verify flow matching succeeds on hard mode (~800-1000 steps).
-4. Implement `DeterministicExpert.act` and `rollout_and_relabel`. Verify DAgger progressively improves on hard mode.
+4. Fill in the `DeterministicExpert.act` gap choice and implement `rollout_and_relabel`. Verify DAgger progressively improves on hard mode.
 5. Compare all methods. Examine generated plots and videos.
 
 ## 12. Troubleshooting
@@ -301,7 +299,7 @@ The critical insight: BC regression fails on hard mode because it averages two m
 conda create -n cs224r python=3.11 && conda activate cs224r
 pip install -r requirements.txt
 
-# Part 1: BC on easy (after implementing BCPolicy, bc_loss, Expert.act)
+# Part 1: BC on easy (after implementing BCPolicy, bc_loss)
 python main.py --method bc --env easy
 
 # Part 2: BC on hard (observe failure)
@@ -310,7 +308,7 @@ python main.py --method bc --env hard
 # Part 3: Flow matching on hard (after implementing FlowMatchingSchedule + flow_matching_loss)
 python main.py --method flow_matching --env hard
 
-# Part 4: DAgger on hard (after implementing DeterministicExpert.act, rollout_and_relabel)
+# Part 4: DAgger on hard (after filling in DeterministicExpert gap choice + rollout_and_relabel)
 python main.py --method dagger --env hard
 
 # Full pipeline (all methods, all envs)
@@ -322,13 +320,13 @@ python main.py
 This starter code is intentionally structured so you can focus on algorithm implementation, not project plumbing.
 
 If you are unsure where to begin, implement in this order:
-1. `expert.py::Expert.act` -- understand the environment and expert behavior first.
+1. Read `expert.py::Expert.act` to understand how the expert works (it is provided).
 2. `networks.py::BCPolicy` -- a simple 3-layer MLP.
 3. `losses.py::bc_loss` -- one-line MSE loss.
 4. Verify Parts 1 and 2 work before moving on.
 5. `networks.py::FlowMatchingSchedule.interpolate` and `FlowMatchingSchedule.sample` -- compare with the provided `DDPMSchedule` to see the pattern.
 6. `losses.py::flow_matching_loss` -- similar structure to `diffusion_loss` (which is provided).
-7. `dagger.py::DeterministicExpert.act` -- minor variant of `Expert.act`.
+7. `dagger.py::DeterministicExpert.act` -- fill in the two small TODOs (just set `raw_target`).
 8. `dagger.py::rollout_and_relabel` -- follow the pattern in `collect_expert_data`.
 
 That order gives you a working baseline, then a generative alternative, then an interactive correction method.
